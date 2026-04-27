@@ -1,0 +1,11 @@
+# compiled output
+/dist
+/node_modules
+
+# environment
+.env
+
+# misc
+.DS_Store
+*.log
+coverage/
