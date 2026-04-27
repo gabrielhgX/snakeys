@@ -209,6 +209,22 @@ export class WalletService {
       });
       if (existing) return { alreadySettled: true };
 
+      // Verify user actually entered this match before allowing settlement
+      const betRecord = await tx.transaction.findFirst({
+        where: {
+          userId,
+          matchId,
+          type: TransactionType.BET,
+          status: TransactionStatus.COMPLETED,
+        },
+      });
+
+      if (!betRecord) {
+        throw new BadRequestException(
+          'User did not participate in this match',
+        );
+      }
+
       const wallet = await this.requireWallet(tx, userId);
       const locked = new Decimal(wallet.balanceLocked);
 
