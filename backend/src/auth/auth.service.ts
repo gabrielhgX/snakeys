@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -29,12 +30,14 @@ export class AuthService {
 
     const hashed = await bcrypt.hash(dto.password, 10);
     const verificationToken = randomBytes(32).toString('hex');
+    const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
 
     const user = await this.prisma.user.create({
       data: {
         email: dto.email,
         password: hashed,
         emailVerificationToken: verificationToken,
+        emailVerificationTokenExpiresAt: tokenExpiresAt,
         wallet: { create: { balanceAvailable: 0, balanceLocked: 0 } },
       },
       select: { id: true, email: true, createdAt: true },
@@ -88,9 +91,25 @@ export class AuthService {
     if (!user) throw new NotFoundException('Invalid or expired verification token');
     if (user.emailVerified) return { message: 'Email already verified' };
 
+    if (
+      user.emailVerificationTokenExpiresAt &&
+      user.emailVerificationTokenExpiresAt < new Date()
+    ) {
+      // Clean up the expired token so the user can request a new one
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { emailVerificationToken: null, emailVerificationTokenExpiresAt: null },
+      });
+      throw new BadRequestException('Verification token has expired. Please register again to get a new token.');
+    }
+
     await this.prisma.user.update({
       where: { id: user.id },
-      data: { emailVerified: true, emailVerificationToken: null },
+      data: {
+        emailVerified: true,
+        emailVerificationToken: null,
+        emailVerificationTokenExpiresAt: null,
+      },
     });
 
     return { message: 'Email verified successfully' };

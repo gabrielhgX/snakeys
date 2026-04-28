@@ -8,16 +8,17 @@ datasource db {
 }
 
 model User {
-  id                     String               @id @default(uuid())
-  email                  String               @unique
-  password               String
-  emailVerified          Boolean              @default(false)
-  emailVerificationToken String?              @unique
-  createdAt              DateTime             @default(now())
-  wallet                 Wallet?
-  transactions           Transaction[]
-  userItems              UserItem[]
-  listings               MarketplaceListing[]
+  id                               String               @id @default(uuid())
+  email                            String               @unique
+  password                         String
+  emailVerified                    Boolean              @default(false)
+  emailVerificationToken           String?              @unique
+  emailVerificationTokenExpiresAt  DateTime?
+  createdAt                        DateTime             @default(now())
+  wallet                           Wallet?
+  transactions                     Transaction[]
+  userItems                        UserItem[]
+  listings                         MarketplaceListing[]
 }
 
 model Wallet {
@@ -40,6 +41,9 @@ model Transaction {
   matchId        String?
   idempotencyKey String?           @unique
   user           User              @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([matchId])
 }
 
 enum TransactionType {
