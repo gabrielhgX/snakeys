@@ -1,5 +1,6 @@
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { json, urlencoded } from 'express';
 import { AppModule } from './app.module';
 
 const REQUIRED_ENV = ['JWT_SECRET', 'INTERNAL_API_KEY', 'DATABASE_URL'];
@@ -15,7 +16,10 @@ function assertEnv() {
 async function bootstrap() {
   assertEnv();
 
-  const app = await NestFactory.create(AppModule);
+  // Item 15: disable built-in body parser to enforce size limit ourselves
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
+  app.use(json({ limit: '10kb' }));
+  app.use(urlencoded({ extended: true, limit: '10kb' }));
 
   app.setGlobalPrefix('api');
 
@@ -27,8 +31,15 @@ async function bootstrap() {
     }),
   );
 
+  // Item 16: explicit origin list from env — no wildcard, fail-closed if unset
+  const rawOrigins = process.env.ALLOWED_ORIGINS;
+  const allowedOrigins = rawOrigins
+    ? rawOrigins.split(',').map((o) => o.trim()).filter(Boolean)
+    : [];
+
   app.enableCors({
-    origin: process.env.NODE_ENV === 'production' ? false : '*',
+    origin: allowedOrigins.length > 0 ? allowedOrigins : false,
+    credentials: true,
   });
 
   const port = process.env.PORT ?? 3001;

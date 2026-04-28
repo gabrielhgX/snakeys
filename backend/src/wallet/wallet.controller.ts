@@ -5,11 +5,13 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { DepositDto } from './dto/deposit.dto';
+import { GetTransactionsQueryDto } from './dto/get-transactions.dto';
 import { WalletService } from './wallet.service';
 
 @Controller('wallet')
@@ -23,8 +25,8 @@ export class WalletController {
   }
 
   @Get('transactions')
-  getTransactions(@Req() req: any) {
-    return this.walletService.getTransactions(req.user.id);
+  getTransactions(@Req() req: any, @Query() query: GetTransactionsQueryDto) {
+    return this.walletService.getTransactions(req.user.id, query.limit, query.offset);
   }
 
   @Post('deposit')

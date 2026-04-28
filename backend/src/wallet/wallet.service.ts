@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -27,17 +28,30 @@ export class WalletService {
   // ── Public read endpoints ──────────────────────────────────────────────────
 
   async getWallet(userId: string) {
-    const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
+    const wallet = await this.prisma.wallet.findUnique({
+      where: { userId },
+      select: { balanceAvailable: true, balanceLocked: true, createdAt: true },
+    });
 
     if (!wallet) throw new NotFoundException('Wallet not found');
 
     return wallet;
   }
 
-  async getTransactions(userId: string) {
+  async getTransactions(userId: string, limit: number, offset: number) {
     return this.prisma.transaction.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
+      take: limit,
+      skip: offset,
+      select: {
+        id: true,
+        type: true,
+        amount: true,
+        status: true,
+        createdAt: true,
+        matchId: true,
+      },
     });
   }
 
@@ -54,6 +68,14 @@ export class WalletService {
     idempotencyKey: string,
   ): Promise<DepositIntent> {
     this.assertPositive(amount);
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { emailVerified: true },
+    });
+    if (!user?.emailVerified) {
+      throw new ForbiddenException('Email not verified. Verify your email before making deposits.');
+    }
 
     await this.requireWalletDirect(userId);
 
