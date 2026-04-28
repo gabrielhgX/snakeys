@@ -8,14 +8,16 @@ datasource db {
 }
 
 model User {
-  id                     String        @id @default(uuid())
-  email                  String        @unique
+  id                     String               @id @default(uuid())
+  email                  String               @unique
   password               String
-  emailVerified          Boolean       @default(false)
-  emailVerificationToken String?       @unique
-  createdAt              DateTime      @default(now())
+  emailVerified          Boolean              @default(false)
+  emailVerificationToken String?              @unique
+  createdAt              DateTime             @default(now())
   wallet                 Wallet?
   transactions           Transaction[]
+  userItems              UserItem[]
+  listings               MarketplaceListing[]
 }
 
 model Wallet {
@@ -45,6 +47,8 @@ enum TransactionType {
   BET
   WIN
   FEE
+  ITEM_PURCHASE
+  ITEM_SALE
 }
 
 enum TransactionStatus {
@@ -59,4 +63,65 @@ model RevokedToken {
   createdAt DateTime @default(now())
 
   @@index([expiresAt])
+}
+
+// ─── Cosméticos e Marketplace ─────────────────────────────────────────────────
+
+enum ItemType {
+  SKIN
+  HAT
+  EMOTE
+  PROFILE_BACKGROUND
+  PROFILE_FRAME
+}
+
+enum Rarity {
+  COMMON
+  RARE
+  EPIC
+  LEGENDARY
+}
+
+enum ListingStatus {
+  ACTIVE
+  SOLD
+  CANCELLED
+}
+
+model Item {
+  id          String     @id @default(uuid())
+  name        String
+  description String?
+  type        ItemType
+  rarity      Rarity
+  imageUrl    String?
+  createdAt   DateTime   @default(now())
+  userItems   UserItem[]
+}
+
+model UserItem {
+  id         String              @id @default(uuid())
+  userId     String
+  itemId     String
+  obtainedAt DateTime            @default(now())
+  user       User                @relation(fields: [userId], references: [id])
+  item       Item                @relation(fields: [itemId], references: [id])
+  listing    MarketplaceListing?
+
+  @@index([userId])
+}
+
+model MarketplaceListing {
+  id         String        @id @default(uuid())
+  userItemId String        @unique
+  sellerId   String
+  price      Decimal       @db.Decimal(18, 8)
+  status     ListingStatus @default(ACTIVE)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  userItem   UserItem      @relation(fields: [userItemId], references: [id])
+  seller     User          @relation(fields: [sellerId], references: [id])
+
+  @@index([sellerId])
+  @@index([status])
 }

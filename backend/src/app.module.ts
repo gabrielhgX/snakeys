@@ -3,6 +3,9 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AuthModule } from './auth/auth.module';
 import { InternalModule } from './internal/internal.module';
+import { InventoryModule } from './inventory/inventory.module';
+import { MarketplaceModule } from './marketplace/marketplace.module';
+import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { UserModule } from './user/user.module';
 import { WalletModule } from './wallet/wallet.module';
@@ -15,6 +18,9 @@ import { WalletModule } from './wallet/wallet.module';
     UserModule,
     WalletModule,
     InternalModule,
+    PaymentsModule,
+    InventoryModule,
+    MarketplaceModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

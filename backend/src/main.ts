@@ -18,7 +18,15 @@ async function bootstrap() {
 
   // Item 15: disable built-in body parser to enforce size limit ourselves
   const app = await NestFactory.create(AppModule, { bodyParser: false });
-  app.use(json({ limit: '10kb' }));
+  // Capture raw body before JSON parsing — needed for webhook HMAC verification
+  app.use(
+    json({
+      limit: '10kb',
+      verify: (req: any, _res: any, buf: Buffer) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
   app.use(urlencoded({ extended: true, limit: '10kb' }));
 
   app.setGlobalPrefix('api');
