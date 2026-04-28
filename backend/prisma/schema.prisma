@@ -50,3 +50,11 @@ enum TransactionStatus {
   COMPLETED
   FAILED
 }
+
+model RevokedToken {
+  jti       String   @id
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+}

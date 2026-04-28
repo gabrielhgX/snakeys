@@ -6,11 +6,14 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { WalletService } from '../wallet/wallet.service';
+import { ConfirmDepositDto } from './dto/confirm-deposit.dto';
 import { MatchEntryDto } from './dto/match-entry.dto';
 import { MatchResultDto } from './dto/match-result.dto';
 import { InternalApiKeyGuard } from './guards/internal-api-key.guard';
 
+@SkipThrottle()
 @Controller('internal')
 @UseGuards(InternalApiKeyGuard)
 export class InternalController {
@@ -31,5 +34,11 @@ export class InternalController {
       dto.betAmount,
       dto.payout,
     );
+  }
+
+  @Post('deposit/confirm')
+  @HttpCode(HttpStatus.OK)
+  confirmDeposit(@Body() dto: ConfirmDepositDto) {
+    return this.walletService.confirmDeposit(dto.transactionId);
   }
 }

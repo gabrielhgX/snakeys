@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -66,7 +67,16 @@ export class AuthService {
     };
   }
 
+  async logout(jti: string, expiresAt: Date): Promise<{ message: string }> {
+    await this.prisma.revokedToken.upsert({
+      where: { jti },
+      create: { jti, expiresAt },
+      update: {},
+    });
+    return { message: 'Logged out successfully' };
+  }
+
   private signToken(userId: string, email: string): string {
-    return this.jwtService.sign({ sub: userId, email });
+    return this.jwtService.sign({ sub: userId, email, jti: randomUUID() });
   }
 }

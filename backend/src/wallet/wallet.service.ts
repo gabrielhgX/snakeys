@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { TransactionStatus, TransactionType } from '@prisma/client';
-import { Decimal } from '@prisma/client/runtime/library';
+import { Decimal, PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -75,22 +75,42 @@ export class WalletService {
       };
     }
 
-    const transaction = await this.prisma.transaction.create({
-      data: {
-        userId,
-        type: TransactionType.DEPOSIT,
-        amount,
-        status: TransactionStatus.PENDING,
-        idempotencyKey,
-      },
-    });
+    try {
+      const transaction = await this.prisma.transaction.create({
+        data: {
+          userId,
+          type: TransactionType.DEPOSIT,
+          amount,
+          status: TransactionStatus.PENDING,
+          idempotencyKey,
+        },
+      });
 
-    return {
-      transactionId: transaction.id,
-      amount,
-      status: 'PENDING',
-      message: 'Deposit initiated. Awaiting payment confirmation.',
-    };
+      return {
+        transactionId: transaction.id,
+        amount,
+        status: 'PENDING',
+        message: 'Deposit initiated. Awaiting payment confirmation.',
+      };
+    } catch (e) {
+      // Two concurrent requests with the same idempotencyKey both passed the
+      // pre-check. The unique constraint caught the second one — return the
+      // record created by the first request instead of propagating a 500.
+      if (e instanceof PrismaClientKnownRequestError && e.code === 'P2002') {
+        const raced = await this.prisma.transaction.findUnique({
+          where: { idempotencyKey },
+        });
+        if (raced) {
+          return {
+            transactionId: raced.id,
+            amount: Number(raced.amount),
+            status: 'PENDING',
+            message: 'Deposit already initiated. Awaiting payment confirmation.',
+          };
+        }
+      }
+      throw e;
+    }
   }
 
   // ── Internal: called by payment gateway webhook (not in controller) ────────
@@ -225,17 +245,26 @@ export class WalletService {
         );
       }
 
+      // Use the amount recorded in the DB — never trust the caller's value for
+      // financial math. The caller's betAmount is validated only as a sanity check.
+      const recordedBet = new Decimal(betRecord.amount);
+      if (!recordedBet.equals(new Decimal(betAmount))) {
+        throw new BadRequestException(
+          `betAmount mismatch: recorded ${recordedBet}, received ${betAmount}`,
+        );
+      }
+
       const wallet = await this.requireWallet(tx, userId);
       const locked = new Decimal(wallet.balanceLocked);
 
-      if (locked.lessThan(betAmount)) {
+      if (locked.lessThan(recordedBet)) {
         throw new BadRequestException(
           'Insufficient locked balance to settle match',
         );
       }
 
       // Consume the locked bet (always — win or loss)
-      const newLocked = locked.minus(betAmount);
+      const newLocked = locked.minus(recordedBet);
       const newAvailable = new Decimal(wallet.balanceAvailable).plus(payout);
 
       await tx.wallet.update({
@@ -251,7 +280,7 @@ export class WalletService {
         data: {
           userId,
           type: TransactionType.FEE,
-          amount: betAmount,
+          amount: recordedBet,
           matchId,
           idempotencyKey: feeKey,
           status: TransactionStatus.COMPLETED,
