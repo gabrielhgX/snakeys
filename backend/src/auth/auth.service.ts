@@ -23,10 +23,18 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDto) {
-    const existing = await this.prisma.user.findUnique({
-      where: { email: dto.email },
+    // One query checking both unique fields so we can return a precise
+    // conflict message (instead of relying on Prisma's P2002 after-the-fact).
+    const existing = await this.prisma.user.findFirst({
+      where: { OR: [{ email: dto.email }, { cpf: dto.cpf }] },
+      select: { email: true, cpf: true },
     });
-    if (existing) throw new ConflictException('Email already in use');
+    if (existing) {
+      if (existing.email === dto.email) {
+        throw new ConflictException('Email already in use');
+      }
+      throw new ConflictException('CPF already in use');
+    }
 
     const hashed = await bcrypt.hash(dto.password, 10);
     const verificationToken = randomBytes(32).toString('hex');
@@ -35,6 +43,7 @@ export class AuthService {
     const user = await this.prisma.user.create({
       data: {
         email: dto.email,
+        cpf: dto.cpf,
         password: hashed,
         emailVerificationToken: verificationToken,
         emailVerificationTokenExpiresAt: tokenExpiresAt,

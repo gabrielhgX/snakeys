@@ -59,12 +59,15 @@ export interface AuthResponse {
 // ── Auth ──────────────────────────────────────────────────────────────────────
 export const authApi = {
   /**
-   * NOTE: backend `RegisterDto` only accepts { email, password } today.
-   * The `username` field collected by the UI is held client-side until the
-   * backend DTO is extended (see `backend/src/auth/dto/register.dto.ts`).
+   * NOTE: `username` is UI-only; the backend `RegisterDto` accepts
+   * { email, password, cpf }. The CPF is sent digits-only (11 chars).
    */
-  register: (email: string, password: string) =>
-    request<AuthResponse>('POST', '/auth/register', { email, password }),
+  register: (email: string, password: string, cpf: string) =>
+    request<AuthResponse>('POST', '/auth/register', {
+      email,
+      password,
+      cpf: cpf.replace(/\D/g, ''),
+    }),
 
   login: (email: string, password: string) =>
     request<AuthResponse>('POST', '/auth/login', { email, password }),
@@ -74,6 +77,23 @@ export const authApi = {
 
   verifyEmail: (token: string) =>
     request<{ message: string }>('POST', '/auth/verify-email', { token }),
+};
+
+// ── Wallet ────────────────────────────────────────────────────────────────────
+export interface WalletDto {
+  balanceAvailable: string;
+  balanceLocked: string;
+  createdAt: string;
+}
+
+export const walletApi = {
+  get: (token: string) => request<WalletDto>('GET', '/wallet', undefined, token),
+};
+
+// ── User ──────────────────────────────────────────────────────────────────────
+export const userApi = {
+  me: (token: string) =>
+    request<AuthUser>('GET', '/users/me', undefined, token),
 };
 
 // ── Token storage ─────────────────────────────────────────────────────────────

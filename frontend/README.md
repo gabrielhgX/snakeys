@@ -27,9 +27,11 @@ frontend/
 │   └── snake.svg              # favicon
 ├── src/
 │   ├── lib/
-│   │   └── api.ts             # cliente HTTP (auth/register, auth/login, ...)
+│   │   ├── api.ts             # cliente HTTP (auth, wallet, users)
+│   │   └── cpf.ts             # máscara + validação CPF (algoritmo oficial)
 │   ├── pages/
-│   │   └── Login.tsx          # Tela 01 — Login / Criar conta
+│   │   ├── Login.tsx          # Tela 01 — Login / Criar conta
+│   │   └── Lobby.tsx          # Tela 02 — Home / Lobby / Jogar
 │   ├── index.css              # Tailwind + utilities (clip-paths, animações)
 │   ├── main.tsx               # Entry + React Router
 │   └── vite-env.d.ts
@@ -42,40 +44,60 @@ frontend/
 └── vite.config.ts
 ```
 
-## Página Login
+## Página Login (`/login`, `/register`)
 
-`src/pages/Login.tsx` implementa a tela `01. Login / Criar conta` conforme o
-rascunho `desenhoteladelogin.jpeg`.
+`src/pages/Login.tsx` — tela `01. Login / Criar conta`.
 
 Layout em 3 colunas no desktop (≥1024px), stacked no mobile:
 
 | Coluna | Conteúdo |
 |--------|----------|
-| Esquerda | Placeholder de **clipes de gameplay** com grid animado, blobs de cor e mock de thumbs (fundo enquanto não há vídeos reais) |
-| Centro | Branding **SNAKEYS** com glow + `by Prime Assets`, posicionado no triângulo deixado pelo corte diagonal |
-| Direita | Painel de **autenticação** (Bem-Vindo!) — toggle Criar conta / Login, formulário, banner de erro/info, link de troca de modo, e selo **+18 Proibido para menores** no rodapé |
+| Esquerda | Placeholder de **clipes de gameplay** com grid animado, blobs de cor e mock de thumbs |
+| Centro | Branding **SNAKEYS** com glow, posicionado no triângulo deixado pelo corte diagonal |
+| Direita | Painel de **autenticação** (Bem-Vindo!) — toggle Criar conta / Login, formulário, selo **+18** no rodapé |
 
-Linhas diagonais via `clip-path` (`.clip-diagonal-r` para o corte da coluna
-esquerda, `.clip-diagonal-strip` para a linha de gradiente sobre o corte —
-veja `src/index.css`).
+Campos do formulário de registro: **Usuário · E-mail · CPF · Senha**. CPF é
+exibido com máscara `000.000.000-00` (ver `src/lib/cpf.ts`) e validado com o
+algoritmo oficial antes do envio.
+
+## Página Lobby (`/lobby`)
+
+`src/pages/Lobby.tsx` — tela `02. Home / Lobby (Aba Jogar)`.
+
+- **Topo** — logo SNAKEYS · abas `Jogar · Loja · Social · Inventário` · saldo
+  da wallet · avatar com username · botão logout.
+- **Sidebar** — seção **Modo** (Online / Offline bots) e seção **Valor do
+  Pote** com os tiers `R$ 2,00` até `R$ 100,00`.
+- **Centro** — 3 cards interativos: **Hunt-Hunt**, **Big Fish**, **Partida
+  Privada**. Cada card mostra descrição, n° de jogadores e o pote selecionado.
+  Clicar dispara o placeholder de matchmaking (pronto para ligar ao
+  `game-server` via Socket.IO).
+
+Ao montar, busca `GET /api/wallet` com o JWT; se o token for inválido, força
+redirect para `/login`.
 
 ## Integração com o backend
 
-A página dispara para os endpoints já existentes em `backend/src/auth`:
+A página Login dispara para:
 
-- `POST /api/auth/register` — `{ email, password }`
+- `POST /api/auth/register` — `{ email, password, cpf }`
 - `POST /api/auth/login` — `{ email, password }`
 
-> **Nota — campo `username`:** o `RegisterDto` atual aceita apenas `email` e
-> `password` e usa `forbidNonWhitelisted: true`. O campo `Usuário` exibido na
-> UI é coletado e armazenado em `localStorage` (`snakeys_username`) — quando o
-> backend for estendido, basta repassá-lo no payload em `src/lib/api.ts`.
+A página Lobby consome:
 
-A validação client-side de senha replica a regra `IsStrongPassword` do backend
-(`min 8`, ao menos 1 maiúscula, 1 minúscula e 1 número), evitando 400 de
-validação antes do envio.
+- `GET /api/wallet` — saldo no header
+- `POST /api/auth/logout` — ao clicar em sair
 
-O JWT recebido é guardado em `localStorage` na chave `snakeys_token`.
+> **Nota — campo `username`:** permanece UI-only (armazenado em
+> `localStorage['snakeys_username']`). O `RegisterDto` usa
+> `forbidNonWhitelisted: true`, então estender o backend + enviar o campo em
+> `src/lib/api.ts` é um passo futuro.
+
+Validação client-side de senha replica `IsStrongPassword` do backend
+(`min 8`, 1 maiúscula, 1 minúscula, 1 número). CPF replica o algoritmo do
+validator `@IsCPF` do backend.
+
+O JWT recebido é guardado em `localStorage['snakeys_token']`.
 
 ## Variáveis de ambiente
 
@@ -86,7 +108,9 @@ O JWT recebido é guardado em `localStorage` na chave `snakeys_token`.
 
 ## Próximos passos
 
-- [ ] Rota `/play` (lobby + matchmaking) e redirecionar após login bem sucedido
+- [x] Rota `/lobby` (matchmaking screen) com redirect após login bem sucedido
+- [ ] Integrar cards de modo com `game-server` via Socket.IO (`join_queue`)
+- [ ] Páginas `/shop`, `/social`, `/inventory` (hoje mostram "Em breve")
 - [ ] Fluxo de verificação de e-mail (`/auth/verify-email`)
 - [ ] Estender `RegisterDto` no backend para aceitar `username`
 - [ ] Substituir `GameplayClipsBackground` por player real de clipes

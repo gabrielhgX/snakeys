@@ -1,8 +1,10 @@
 import { useId, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   ArrowRight,
   Eye,
   EyeOff,
+  IdCard,
   Loader2,
   Lock,
   Mail,
@@ -11,6 +13,7 @@ import {
   User,
 } from 'lucide-react';
 import { ApiError, authApi, tokenStorage, usernameStorage } from '../lib/api';
+import { formatCPF, isValidCPF, stripCPF } from '../lib/cpf';
 
 type Mode = 'login' | 'register';
 
@@ -24,9 +27,11 @@ const USERNAME_RE = /^[a-zA-Z0-9_-]{3,20}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function Login({ initialMode = 'register' }: LoginProps) {
+  const navigate = useNavigate();
   const [mode, setMode] = useState<Mode>(initialMode);
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
+  const [cpf, setCpf] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -48,6 +53,13 @@ export default function Login({ initialMode = 'register' }: LoginProps) {
     return EMAIL_RE.test(email) ? null : 'E-mail inválido';
   }, [email]);
 
+  const cpfError = useMemo(() => {
+    if (!isRegister || cpf === '') return null;
+    const digits = stripCPF(cpf);
+    if (digits.length < 11) return 'CPF incompleto';
+    return isValidCPF(cpf) ? null : 'CPF inválido';
+  }, [cpf, isRegister]);
+
   const passwordError = useMemo(() => {
     if (password === '') return null;
     if (!isRegister) return password.length < 6 ? 'Mínimo de 6 caracteres' : null;
@@ -62,7 +74,8 @@ export default function Login({ initialMode = 'register' }: LoginProps) {
     password.length > 0 &&
     !emailError &&
     !passwordError &&
-    (!isRegister || (username.length > 0 && !usernameError));
+    (!isRegister ||
+      (username.length > 0 && !usernameError && cpf.length > 0 && !cpfError));
 
   function switchMode() {
     setMode((m) => (m === 'login' ? 'register' : 'login'));
@@ -79,7 +92,7 @@ export default function Login({ initialMode = 'register' }: LoginProps) {
 
     try {
       const res = isRegister
-        ? await authApi.register(email, password)
+        ? await authApi.register(email, password, cpf)
         : await authApi.login(email, password);
 
       tokenStorage.set(res.token);
@@ -90,7 +103,8 @@ export default function Login({ initialMode = 'register' }: LoginProps) {
           ? `Conta criada! Bem-vindo, ${username || res.user.email}.`
           : `Login efetuado, ${res.user.email}.`,
       );
-      // TODO: redirect to /play once that route exists.
+      // Short pause so the user sees the success banner, then redirect to lobby.
+      setTimeout(() => navigate('/lobby', { replace: true }), 450);
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Erro inesperado.';
       setError(message);
@@ -147,14 +161,17 @@ export default function Login({ initialMode = 'register' }: LoginProps) {
             switchMode={switchMode}
             username={username}
             email={email}
+            cpf={cpf}
             password={password}
             setUsername={setUsername}
             setEmail={setEmail}
+            setCpf={setCpf}
             setPassword={setPassword}
             showPassword={showPassword}
             setShowPassword={setShowPassword}
             usernameError={usernameError}
             emailError={emailError}
+            cpfError={cpfError}
             passwordError={passwordError}
             loading={loading}
             canSubmit={canSubmit}
@@ -179,14 +196,17 @@ export default function Login({ initialMode = 'register' }: LoginProps) {
             switchMode={switchMode}
             username={username}
             email={email}
+            cpf={cpf}
             password={password}
             setUsername={setUsername}
             setEmail={setEmail}
+            setCpf={setCpf}
             setPassword={setPassword}
             showPassword={showPassword}
             setShowPassword={setShowPassword}
             usernameError={usernameError}
             emailError={emailError}
+            cpfError={cpfError}
             passwordError={passwordError}
             loading={loading}
             canSubmit={canSubmit}
@@ -348,14 +368,17 @@ interface AuthFormPanelProps {
   switchMode: () => void;
   username: string;
   email: string;
+  cpf: string;
   password: string;
   setUsername: (v: string) => void;
   setEmail: (v: string) => void;
+  setCpf: (v: string) => void;
   setPassword: (v: string) => void;
   showPassword: boolean;
   setShowPassword: (v: boolean) => void;
   usernameError: string | null;
   emailError: string | null;
+  cpfError: string | null;
   passwordError: string | null;
   loading: boolean;
   canSubmit: boolean;
@@ -370,14 +393,17 @@ function AuthFormPanel(props: AuthFormPanelProps) {
     switchMode,
     username,
     email,
+    cpf,
     password,
     setUsername,
     setEmail,
+    setCpf,
     setPassword,
     showPassword,
     setShowPassword,
     usernameError,
     emailError,
+    cpfError,
     passwordError,
     loading,
     canSubmit,
@@ -442,6 +468,19 @@ function AuthFormPanel(props: AuthFormPanelProps) {
             autoComplete="email"
             error={emailError}
           />
+          {isRegister && (
+            <Field
+              icon={<IdCard className="h-4 w-4" />}
+              label="CPF"
+              value={cpf}
+              onChange={(v) => setCpf(formatCPF(v))}
+              placeholder="000.000.000-00"
+              autoComplete="off"
+              inputMode="numeric"
+              maxLength={14}
+              error={cpfError}
+            />
+          )}
           <PasswordField
             icon={<Lock className="h-4 w-4" />}
             label="Senha"
@@ -565,6 +604,8 @@ interface FieldProps {
   placeholder?: string;
   autoComplete?: string;
   error?: string | null;
+  inputMode?: 'text' | 'numeric' | 'email' | 'tel' | 'search' | 'url';
+  maxLength?: number;
 }
 
 function Field({
@@ -576,6 +617,8 @@ function Field({
   placeholder,
   autoComplete,
   error,
+  inputMode,
+  maxLength,
 }: FieldProps) {
   const id = useId();
   return (
@@ -603,6 +646,8 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           autoComplete={autoComplete}
+          inputMode={inputMode}
+          maxLength={maxLength}
           className="w-full bg-transparent px-3 py-3 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none"
         />
       </div>
