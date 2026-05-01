@@ -278,6 +278,8 @@ export interface CosmeticInstanceDto {
   serialNumber: number;
   floatValue: number;
   obtainedAt: string;
+  /** Number of matches settled while this skin was equipped. */
+  usageCount?: number;
   item: {
     id: string;
     name: string;

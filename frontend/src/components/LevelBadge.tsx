@@ -171,14 +171,14 @@ export default function LevelBadge({
         </div>
       </div>
 
-      {/* ── Tooltip ───────────────────────────────────────────────────────── */}
+      {/* ── Tooltip — positioned below so it's never clipped by the sticky header */}
       <div
         role="tooltip"
-        className="pointer-events-none absolute -top-9 left-1/2 z-50 -translate-x-1/2 whitespace-nowrap rounded border border-snake-500/20 bg-base-800/95 px-2.5 py-1.5 font-mono text-[10px] tracking-wide text-zinc-300 opacity-0 shadow-lg backdrop-blur-sm transition-opacity duration-150 group-hover/lvl:opacity-100"
+        className="pointer-events-none absolute left-1/2 top-full z-50 mt-2 -translate-x-1/2 whitespace-nowrap rounded border border-snake-500/20 bg-base-800/95 px-2.5 py-1.5 font-mono text-[10px] tracking-wide text-zinc-300 opacity-0 shadow-lg backdrop-blur-sm transition-opacity duration-150 group-hover/lvl:opacity-100"
       >
+        {/* Caret pointing UP toward the badge */}
+        <div className="absolute -top-[5px] left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 border-l border-t border-snake-500/20 bg-base-800" />
         {tooltip}
-        {/* Caret */}
-        <div className="absolute -bottom-[5px] left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 border-b border-r border-snake-500/20 bg-base-800" />
       </div>
     </div>
   );

@@ -156,6 +156,10 @@ model UserItem {
   serialNumber  Int                 @unique @default(autoincrement())
   floatValue    Float               @default(0)
   obtainedAt    DateTime            @default(now())
+  // Incremented by WalletService each time a match is settled while this
+  // skin is equipped. Read-only from the client — drives the "lore" stat
+  // ("X partidas jogadas com esta skin") shown in the inventory detail panel.
+  usageCount    Int                 @default(0)
   user          User                @relation(fields: [userId], references: [id])
   item          Item                @relation(fields: [itemId], references: [id])
   listing       MarketplaceListing?

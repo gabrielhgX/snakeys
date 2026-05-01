@@ -27,6 +27,7 @@ export class InventoryService {
           serialNumber: true,
           floatValue: true,
           obtainedAt: true,
+          usageCount: true,
           item: {
             select: {
               id: true,

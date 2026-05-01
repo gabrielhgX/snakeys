@@ -661,6 +661,24 @@ export class WalletService {
           (err as Error).stack,
         );
       }
+
+      // Increment usageCount on the equipped skin — non-critical, fire-and-forget.
+      // A failure here must never roll back the wallet settlement.
+      this.prisma.user
+        .findUnique({ where: { id: userId }, select: { equippedSkinId: true } })
+        .then((u) => {
+          if (u?.equippedSkinId) {
+            return this.prisma.userItem.update({
+              where: { id: u.equippedSkinId },
+              data: { usageCount: { increment: 1 } },
+            });
+          }
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `usageCount increment failed for user ${userId}: ${(err as Error).message}`,
+          );
+        });
     }
 
     const bal = await this.getBalance(userId);
