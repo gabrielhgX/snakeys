@@ -86,8 +86,53 @@ export interface WalletDto {
   createdAt: string;
 }
 
+export interface BalanceDto {
+  balance: number;
+  locked: number;
+}
+
+export interface DepositIntent {
+  transactionId: string;
+  amount: number;
+  status: 'PENDING';
+  message: string;
+  pixCode: string;
+  expiresAt: string;
+}
+
+export interface WithdrawIntent {
+  transactionId: string;
+  amount: number;
+  status: 'PENDING';
+  message: string;
+}
+
 export const walletApi = {
   get: (token: string) => request<WalletDto>('GET', '/wallet', undefined, token),
+
+  balance: (token: string) =>
+    request<BalanceDto>('GET', '/wallet/balance', undefined, token),
+
+  deposit: (token: string, amount: number, idempotencyKey: string) =>
+    request<DepositIntent>(
+      'POST',
+      '/wallet/deposit',
+      { amount, idempotencyKey },
+      token,
+    ),
+
+  withdraw: (
+    token: string,
+    amount: number,
+    cpf: string,
+    idempotencyKey: string,
+  ) =>
+    request<WithdrawIntent>(
+      'POST',
+      '/wallet/withdraw',
+      { amount, cpf: cpf.replace(/\D/g, ''), idempotencyKey },
+      token,
+    ),
 };
 
 // ── User ──────────────────────────────────────────────────────────────────────

@@ -4,10 +4,12 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { TransactionStatus, TransactionType } from '@prisma/client';
 import { Decimal, PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
+import { generatePixCode } from './pix-code.util';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -16,7 +18,22 @@ export interface DepositIntent {
   amount: number;
   status: 'PENDING';
   message: string;
-  // Future: paymentUrl from real gateway
+  /** Pix BRCode (EMV) — paste into any bank app (fictitious sandbox key). */
+  pixCode: string;
+  /** Expiry of the Pix code (15 minutes from creation). */
+  expiresAt: string;
+}
+
+export interface WithdrawIntent {
+  transactionId: string;
+  amount: number;
+  status: 'PENDING';
+  message: string;
+}
+
+export interface BalanceDto {
+  balance: number; // balanceAvailable, ready to spend
+  locked: number; // balanceLocked (in active bets / pending withdraws)
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -36,6 +53,27 @@ export class WalletService {
     if (!wallet) throw new NotFoundException('Wallet not found');
 
     return wallet;
+  }
+
+  /**
+   * Thin balance-only endpoint for the UI. Returns numbers (not Decimal
+   * strings) since the client renders currency from JS numbers.
+   *
+   * Only `balance` (= available) is the spend-now amount. `locked` covers
+   * funds tied up in active matches or pending withdrawals.
+   */
+  async getBalance(userId: string): Promise<BalanceDto> {
+    const wallet = await this.prisma.wallet.findUnique({
+      where: { userId },
+      select: { balanceAvailable: true, balanceLocked: true },
+    });
+
+    if (!wallet) throw new NotFoundException('Wallet not found');
+
+    return {
+      balance: Number(wallet.balanceAvailable),
+      locked: Number(wallet.balanceLocked),
+    };
   }
 
   async getTransactions(userId: string, limit: number, offset: number) {
@@ -61,6 +99,10 @@ export class WalletService {
    * Creates a PENDING deposit request. Does NOT touch balances.
    * A real payment gateway webhook would later call confirmDeposit().
    * Idempotent: same idempotencyKey always returns the same record.
+   *
+   * Returns a Pix BRCode (Copia-e-Cola) so the UI can display it for the
+   * user to scan/paste. The code is fictitious sandbox data — no funds
+   * will settle until a real gateway is wired to `confirmDeposit`.
    */
   async initiateDeposit(
     userId: string,
@@ -89,12 +131,7 @@ export class WalletService {
         throw new ConflictException('Idempotency key already used');
       }
 
-      return {
-        transactionId: existing.id,
-        amount: Number(existing.amount),
-        status: 'PENDING',
-        message: 'Deposit already initiated. Awaiting payment confirmation.',
-      };
+      return this.buildDepositIntent(existing, true);
     }
 
     try {
@@ -108,12 +145,7 @@ export class WalletService {
         },
       });
 
-      return {
-        transactionId: transaction.id,
-        amount,
-        status: 'PENDING',
-        message: 'Deposit initiated. Awaiting payment confirmation.',
-      };
+      return this.buildDepositIntent(transaction, false);
     } catch (e) {
       // Two concurrent requests with the same idempotencyKey both passed the
       // pre-check. The unique constraint caught the second one — return the
@@ -123,16 +155,154 @@ export class WalletService {
           where: { idempotencyKey },
         });
         if (raced) {
-          return {
-            transactionId: raced.id,
-            amount: Number(raced.amount),
-            status: 'PENDING',
-            message: 'Deposit already initiated. Awaiting payment confirmation.',
-          };
+          return this.buildDepositIntent(raced, true);
         }
       }
       throw e;
     }
+  }
+
+  private buildDepositIntent(
+    tx: { id: string; amount: Decimal | number; createdAt: Date },
+    alreadyExisted: boolean,
+  ): DepositIntent {
+    const amount = Number(tx.amount);
+    const pixCode = generatePixCode({ amount, transactionId: tx.id });
+    // Pix codes in Brazil typically expire after ~15 minutes. We base expiry
+    // off the transaction's createdAt so repeated calls return the same
+    // deadline, not a sliding window.
+    const expiresAt = new Date(tx.createdAt.getTime() + 15 * 60 * 1000);
+
+    return {
+      transactionId: tx.id,
+      amount,
+      status: 'PENDING',
+      message: alreadyExisted
+        ? 'Deposit already initiated. Awaiting payment confirmation.'
+        : 'Deposit initiated. Awaiting payment confirmation.',
+      pixCode,
+      expiresAt: expiresAt.toISOString(),
+    };
+  }
+
+  // ── Public withdraw ───────────────────────────────────────────────────────
+
+  /**
+   * Requests a withdrawal.
+   *
+   * Flow (atomic):
+   *   1. Verify the submitted CPF matches the one on file (anti-fraud).
+   *   2. Verify available balance covers the requested amount.
+   *   3. Move `amount` from `balanceAvailable` → `balanceLocked` so the
+   *      user can't spend it elsewhere while the ops team processes.
+   *   4. Create a PENDING `WITHDRAW` transaction.
+   *
+   * A real payment-ops worker would later call `confirmWithdraw()` (debit
+   * locked + mark COMPLETED) or `rejectWithdraw()` (unlock + mark FAILED).
+   * Both are left as follow-ups — this endpoint only creates the request.
+   *
+   * Idempotent on `idempotencyKey`.
+   */
+  async requestWithdraw(
+    userId: string,
+    amount: number,
+    cpf: string,
+    idempotencyKey: string,
+  ): Promise<WithdrawIntent> {
+    this.assertPositive(amount);
+
+    // CPF comparison must be on normalized digits. The DTO already strips
+    // non-digits, but we re-normalize defensively in case the service is
+    // called from a context that bypassed validation (tests, internal code).
+    const normalizedCpf = cpf.replace(/\D/g, '');
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { cpf: true, emailVerified: true },
+    });
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.emailVerified) {
+      throw new ForbiddenException(
+        'Email not verified. Verify your email before requesting withdrawals.',
+      );
+    }
+    if (user.cpf !== normalizedCpf) {
+      // Deliberately vague message so an attacker learns nothing from a
+      // mismatch — but we use 401 (auth/identity failure) not 400.
+      throw new UnauthorizedException('CPF does not match the account on file');
+    }
+
+    // Fast path for idempotent retry.
+    const existing = await this.prisma.transaction.findUnique({
+      where: { idempotencyKey },
+    });
+    if (existing) {
+      if (existing.userId !== userId) {
+        throw new ConflictException('Idempotency key already used');
+      }
+      return {
+        transactionId: existing.id,
+        amount: Number(existing.amount),
+        status: 'PENDING',
+        message: 'Withdrawal already requested. Awaiting processing.',
+      };
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const wallet = await this.requireWallet(tx, userId);
+      const available = new Decimal(wallet.balanceAvailable);
+
+      if (available.lessThan(amount)) {
+        throw new BadRequestException('Insufficient available balance');
+      }
+
+      // Lock the funds so they can't be spent by a concurrent bet / another
+      // withdraw request while ops processes this one.
+      await tx.wallet.update({
+        where: { userId },
+        data: {
+          balanceAvailable: available.minus(amount),
+          balanceLocked: new Decimal(wallet.balanceLocked).plus(amount),
+        },
+      });
+
+      try {
+        const transaction = await tx.transaction.create({
+          data: {
+            userId,
+            type: TransactionType.WITHDRAW,
+            amount,
+            status: TransactionStatus.PENDING,
+            idempotencyKey,
+          },
+        });
+
+        return {
+          transactionId: transaction.id,
+          amount,
+          status: 'PENDING' as const,
+          message: 'Withdrawal requested. Awaiting processing (up to 1 business day).',
+        };
+      } catch (e) {
+        if (e instanceof PrismaClientKnownRequestError && e.code === 'P2002') {
+          // Concurrent duplicate: someone else inside this Prisma $transaction
+          // couldn't have raced (they'd block on the row lock), so this must
+          // have been created between our pre-check and the lock — fetch it.
+          const raced = await tx.transaction.findUnique({
+            where: { idempotencyKey },
+          });
+          if (raced) {
+            return {
+              transactionId: raced.id,
+              amount: Number(raced.amount),
+              status: 'PENDING' as const,
+              message: 'Withdrawal already requested. Awaiting processing.',
+            };
+          }
+        }
+        throw e;
+      }
+    });
   }
 
   // ── Internal: called by payment gateway webhook (not in controller) ────────

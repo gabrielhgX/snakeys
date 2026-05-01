@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useState,
@@ -7,6 +8,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import {
   Bot,
+  ChevronDown,
   Crown,
   Fish,
   Gamepad2,
@@ -19,6 +21,7 @@ import {
   Users,
   Wallet,
 } from 'lucide-react';
+import WalletModal from '../components/WalletModal';
 import {
   ApiError,
   authApi,
@@ -122,9 +125,9 @@ export default function Lobby() {
     () => usernameStorage.get() ?? 'Jogador',
   );
   const [queueStatus, setQueueStatus] = useState<string | null>(null);
+  const [walletModalOpen, setWalletModalOpen] = useState(false);
 
-  // Redirect to /login if the user is not authenticated.
-  useEffect(() => {
+  const refreshWallet = useCallback(() => {
     const token = tokenStorage.get();
     if (!token) {
       navigate('/login', { replace: true });
@@ -132,7 +135,10 @@ export default function Lobby() {
     }
     walletApi
       .get(token)
-      .then((w) => setWallet(w))
+      .then((w) => {
+        setWallet(w);
+        setWalletError(null);
+      })
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 401) {
           tokenStorage.clear();
@@ -143,17 +149,40 @@ export default function Lobby() {
       });
   }, [navigate]);
 
+  // Initial load + redirect guard.
+  useEffect(() => {
+    if (!tokenStorage.get()) {
+      navigate('/login', { replace: true });
+      return;
+    }
+    refreshWallet();
+  }, [navigate, refreshWallet]);
+
+  const balanceNumber = useMemo(
+    () => (wallet ? Number(wallet.balanceAvailable) : 0),
+    [wallet],
+  );
   const balanceLabel = useMemo(
     () => (wallet ? formatCurrency(wallet.balanceAvailable) : '—'),
     [wallet],
   );
 
   function handlePlay(modeKey: GameMode['key']) {
-    // TODO: integrate with game-server matchmaking via Socket.IO.
-    setQueueStatus(
-      `Procurando partida · ${modeKey.toUpperCase()} · ${mode.toUpperCase()} · ${formatCurrency(pot)}...`,
-    );
-    setTimeout(() => setQueueStatus(null), 3500);
+    if (modeKey === 'private') {
+      setQueueStatus('Partidas privadas em breve...');
+      setTimeout(() => setQueueStatus(null), 3000);
+      return;
+    }
+    // Online matchmaking: not yet implemented → fall back to offline bot mode
+    if (mode === 'online') {
+      setQueueStatus('Matchmaking online em breve — iniciando modo offline...');
+      setTimeout(() => {
+        setQueueStatus(null);
+        navigate(`/game?mode=${modeKey}`);
+      }, 1800);
+      return;
+    }
+    navigate(`/game?mode=${modeKey}`);
   }
 
   async function handleLogout() {
@@ -177,7 +206,15 @@ export default function Lobby() {
         username={username}
         balanceLabel={balanceLabel}
         balanceError={walletError}
+        onBalanceClick={() => setWalletModalOpen(true)}
         onLogout={handleLogout}
+      />
+
+      <WalletModal
+        open={walletModalOpen}
+        onClose={() => setWalletModalOpen(false)}
+        balance={balanceNumber}
+        onBalanceChanged={refreshWallet}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -220,6 +257,7 @@ function TopBar({
   username,
   balanceLabel,
   balanceError,
+  onBalanceClick,
   onLogout,
 }: {
   activeTab: TabId;
@@ -227,6 +265,7 @@ function TopBar({
   username: string;
   balanceLabel: string;
   balanceError: string | null;
+  onBalanceClick: () => void;
   onLogout: () => void;
 }) {
   return (
@@ -267,15 +306,18 @@ function TopBar({
 
       {/* Wallet + user */}
       <div className="flex items-center gap-3">
-        <div
-          className="flex items-center gap-2.5 rounded-full border border-amber-500/20 bg-amber-500/5 px-4 py-1.5"
-          title={balanceError ?? 'Saldo disponível'}
+        <button
+          type="button"
+          onClick={onBalanceClick}
+          title={balanceError ?? 'Abrir carteira (depositar / sacar)'}
+          className="group flex items-center gap-2.5 rounded-full border border-amber-500/20 bg-amber-500/5 px-4 py-1.5 transition hover:border-amber-400/50 hover:bg-amber-500/10 focus:outline-none focus:ring-2 focus:ring-amber-400/40"
         >
           <Wallet className="h-4 w-4 text-amber-300" />
           <span className="font-mono text-sm font-semibold tabular-nums text-amber-200">
             {balanceLabel}
           </span>
-        </div>
+          <ChevronDown className="h-3.5 w-3.5 text-amber-300/70 transition group-hover:translate-y-0.5 group-hover:text-amber-200" />
+        </button>
         <div className="hidden items-center gap-2.5 rounded-full border border-white/5 bg-base-700/60 py-1 pl-2 pr-3 sm:flex">
           <Avatar name={username} />
           <span className="max-w-[140px] truncate text-sm font-medium text-zinc-200">

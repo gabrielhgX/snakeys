@@ -49,6 +49,7 @@ model Transaction {
 
 enum TransactionType {
   DEPOSIT
+  WITHDRAW
   BET
   WIN
   FEE
