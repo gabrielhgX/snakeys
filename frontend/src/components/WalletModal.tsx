@@ -17,6 +17,7 @@ import {
   Loader2,
   Wallet,
   X,
+  Zap,
 } from 'lucide-react';
 import {
   ApiError,
@@ -28,6 +29,9 @@ import {
 import { formatCPF, isValidCPF, stripCPF } from '../lib/cpf';
 
 type Tab = 'deposit' | 'withdraw';
+
+/** Vite built-in flag — stripped to `false` in production builds. */
+const IS_DEV = import.meta.env.DEV;
 
 interface WalletModalProps {
   open: boolean;
@@ -127,11 +131,11 @@ export default function WalletModal({
       />
 
       {/* Panel */}
-      <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-white/10 bg-base-800 shadow-[0_30px_80px_rgba(0,0,0,0.65)]">
+      <div className="relative w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-base-800">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-white/5 px-6 py-4">
+        <div className="flex items-center justify-between border-b border-white/10 px-6 py-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-amber-400/30 bg-amber-500/10">
+            <div className="flex h-9 w-9 items-center justify-center rounded-md border border-white/10 bg-base-700">
               <Wallet className="h-4 w-4 text-amber-300" />
             </div>
             <div>
@@ -204,10 +208,10 @@ function TabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`flex flex-1 items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold tracking-wide transition ${
+      className={`flex flex-1 items-center justify-center gap-2 rounded-md border py-2.5 text-sm font-semibold tracking-wide transition ${
         active
-          ? 'bg-snake-500 text-base-900 shadow-[0_4px_14px_rgba(34,197,94,0.35)]'
-          : 'bg-base-700/60 text-zinc-400 hover:bg-base-700/90 hover:text-zinc-200'
+          ? 'border-snake-500 bg-snake-500 text-base-900'
+          : 'border-white/10 bg-base-700 text-zinc-400 hover:border-white/20 hover:text-zinc-200'
       }`}
     >
       {icon}
@@ -224,6 +228,8 @@ function DepositTab({ onSuccess }: { onSuccess?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [intent, setIntent] = useState<DepositIntent | null>(null);
   const [copied, setCopied] = useState(false);
+  const [simulating, setSimulating] = useState(false);
+  const [settledAmount, setSettledAmount] = useState<number | null>(null);
 
   const canSubmit = amount >= 1 && !loading;
 
@@ -264,19 +270,77 @@ function DepositTab({ onSuccess }: { onSuccess?: () => void }) {
     }
   }
 
+  async function handleSimulate() {
+    if (!intent || simulating) return;
+    const token = tokenStorage.get();
+    if (!token) {
+      setError('Sessão expirada. Faça login novamente.');
+      return;
+    }
+    setError(null);
+    setSimulating(true);
+    try {
+      await walletApi.simulatePayment(token, intent.transactionId);
+      setSettledAmount(intent.amount);
+      // Trigger the header refetch so the saldo updates instantly.
+      onSuccess?.();
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : 'Erro inesperado ao simular pagamento.',
+      );
+    } finally {
+      setSimulating(false);
+    }
+  }
+
   function reset() {
     setIntent(null);
     setInput('R$ 0,00');
     setAmount(0);
     setError(null);
+    setSettledAmount(null);
     onSuccess?.();
   }
 
-  // ── Success view ──
+  // ── Settled view (after dev-only simulate) ──
+  if (settledAmount !== null) {
+    return (
+      <div className="space-y-4">
+        <div className="rounded-md border border-snake-500/40 bg-snake-500/10 p-5 text-center">
+          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full border border-snake-500/40 bg-base-800">
+            <CheckCircle2 className="h-6 w-6 text-snake-300" />
+          </div>
+          <div className="font-display text-xl tracking-wide text-white">
+            Pagamento confirmado
+          </div>
+          <div className="mt-1 text-xs text-snake-200/80">
+            <span className="font-mono font-semibold text-amber-200">
+              {formatCurrency(settledAmount)}
+            </span>{' '}
+            foram creditados ao seu saldo.
+          </div>
+        </div>
+
+        {error && <ErrorBanner message={error} />}
+
+        <button
+          type="button"
+          onClick={reset}
+          className="w-full rounded-md border border-white/10 bg-base-700 py-2.5 text-sm font-semibold text-zinc-200 transition hover:border-white/20"
+        >
+          Novo depósito
+        </button>
+      </div>
+    );
+  }
+
+  // ── Pix-generated view ──
   if (intent) {
     return (
       <div className="space-y-4">
-        <div className="flex items-start gap-3 rounded-lg border border-snake-400/30 bg-snake-500/10 p-4">
+        <div className="flex items-start gap-3 rounded-md border border-snake-500/30 bg-snake-500/10 p-4">
           <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-snake-300" />
           <div className="flex-1 text-sm">
             <div className="font-semibold text-snake-100">
@@ -298,16 +362,16 @@ function DepositTab({ onSuccess }: { onSuccess?: () => void }) {
             readOnly
             value={intent.pixCode}
             rows={4}
-            className="w-full resize-none rounded-lg border border-white/10 bg-base-700/60 px-3 py-3 font-mono text-xs leading-relaxed text-zinc-200 focus:border-snake-400/60 focus:outline-none"
+            className="w-full resize-none rounded-md border border-white/10 bg-base-700 px-3 py-3 font-mono text-xs leading-relaxed text-zinc-200 focus:border-snake-500/60 focus:outline-none"
             onFocus={(e) => e.currentTarget.select()}
           />
           <button
             type="button"
             onClick={handleCopy}
-            className={`absolute right-2 top-2 flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold transition ${
+            className={`absolute right-2 top-2 flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-semibold transition ${
               copied
-                ? 'bg-snake-500/90 text-base-900'
-                : 'bg-base-900/70 text-zinc-300 hover:bg-base-900'
+                ? 'border-snake-500 bg-snake-500 text-base-900'
+                : 'border-white/10 bg-base-900 text-zinc-300 hover:border-white/20'
             }`}
           >
             {copied ? (
@@ -324,7 +388,7 @@ function DepositTab({ onSuccess }: { onSuccess?: () => void }) {
           </button>
         </div>
 
-        <div className="flex items-center gap-2 rounded-lg border border-amber-400/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
+        <div className="flex items-center gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
           <Clock className="h-3.5 w-3.5 shrink-0" />
           <span>
             Expira em{' '}
@@ -338,11 +402,44 @@ function DepositTab({ onSuccess }: { onSuccess?: () => void }) {
           </span>
         </div>
 
-        <div className="flex gap-2 pt-2">
+        {error && <ErrorBanner message={error} />}
+
+        {IS_DEV && (
+          <div className="rounded-md border border-dashed border-amber-500/30 bg-amber-500/5 p-3">
+            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.25em] text-amber-400">
+              <Zap className="h-3 w-3" />
+              Dev tools
+            </div>
+            <button
+              type="button"
+              onClick={handleSimulate}
+              disabled={simulating}
+              className="flex w-full items-center justify-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 py-2 text-sm font-semibold text-amber-200 transition hover:border-amber-400/60 hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {simulating ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>CONFIRMANDO...</span>
+                </>
+              ) : (
+                <>
+                  <Zap className="h-4 w-4" />
+                  <span>SIMULAR PAGAMENTO</span>
+                </>
+              )}
+            </button>
+            <p className="mt-2 text-[10px] leading-snug text-amber-300/60">
+              Atalho de desenvolvimento — credita o saldo sem passar pelo
+              gateway. Oculto em produção.
+            </p>
+          </div>
+        )}
+
+        <div className="flex gap-2 pt-1">
           <button
             type="button"
             onClick={reset}
-            className="flex-1 rounded-lg border border-white/10 bg-base-700/60 py-2.5 text-sm font-semibold text-zinc-200 transition hover:bg-base-700"
+            className="flex-1 rounded-md border border-white/10 bg-base-700 py-2.5 text-sm font-semibold text-zinc-200 transition hover:border-white/20"
           >
             Novo depósito
           </button>
@@ -384,7 +481,7 @@ function DepositTab({ onSuccess }: { onSuccess?: () => void }) {
       <button
         type="submit"
         disabled={!canSubmit}
-        className="flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-snake-500 to-snake-400 font-bold tracking-wide text-base-900 transition hover:from-snake-400 hover:to-snake-300 disabled:cursor-not-allowed disabled:opacity-50"
+        className="flex h-11 w-full items-center justify-center gap-2 rounded-md bg-snake-500 font-bold tracking-wide text-base-900 transition hover:bg-snake-400 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {loading ? (
           <>
@@ -579,7 +676,7 @@ function WithdrawTab({
       <button
         type="submit"
         disabled={!canSubmit}
-        className="flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-amber-500 to-amber-400 font-bold tracking-wide text-base-900 transition hover:from-amber-400 hover:to-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
+        className="flex h-11 w-full items-center justify-center gap-2 rounded-md bg-amber-500 font-bold tracking-wide text-base-900 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {loading ? (
           <>

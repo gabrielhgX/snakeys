@@ -71,10 +71,10 @@ const GAME_MODES: GameMode[] = [
     title: 'Hunt-Hunt',
     tagline: 'Caçador vs. Caçador',
     description:
-      'Last snake standing. Quem elimina mais leva o pote inteiro.',
+      'Elimine cobras inimigas para roubar o pote delas. 50% no cash-out.',
     icon: <Target className="h-7 w-7" />,
     tone: 'red',
-    players: '8 jogadores',
+    players: '100 jogadores',
     tag: 'CLÁSSICO',
   },
   {
@@ -82,10 +82,10 @@ const GAME_MODES: GameMode[] = [
     title: 'Big Fish',
     tagline: 'Maior massa vence',
     description:
-      'Cresça rápido, domine o mapa — o top 3 divide o prêmio.',
+      '16 minutos com drain progressivo. Top 3 divide o pote (50/30/20).',
     icon: <Fish className="h-7 w-7" />,
     tone: 'cyan',
-    players: '16 jogadores',
+    players: '30 jogadores',
     tag: 'POPULAR',
   },
   {
@@ -126,6 +126,9 @@ export default function Lobby() {
   );
   const [queueStatus, setQueueStatus] = useState<string | null>(null);
   const [walletModalOpen, setWalletModalOpen] = useState(false);
+  // Guards against double-click on a mode card while the entry POST is
+  // in flight — without this the user could be debited twice in a row.
+  const [entryInFlight, setEntryInFlight] = useState(false);
 
   const refreshWallet = useCallback(() => {
     const token = tokenStorage.get();
@@ -167,22 +170,69 @@ export default function Lobby() {
     [wallet],
   );
 
-  function handlePlay(modeKey: GameMode['key']) {
-    if (modeKey === 'private') {
-      setQueueStatus('Partidas privadas em breve...');
-      setTimeout(() => setQueueStatus(null), 3000);
+  async function handlePlay(modeKey: GameMode['key']) {
+    if (entryInFlight) return;
+
+    // Pre-flight: avoid an embarrassing 4xx after the user clicks — we
+    // already know the balance, so we can short-circuit and pop the
+    // wallet modal immediately. The backend re-validates anyway.
+    if (balanceNumber < pot) {
+      setQueueStatus(
+        `Saldo insuficiente · você precisa de ${formatCurrency(pot)}`,
+      );
+      window.setTimeout(() => setQueueStatus(null), 4000);
+      setWalletModalOpen(true);
       return;
     }
-    // Online matchmaking: not yet implemented → fall back to offline bot mode
-    if (mode === 'online') {
-      setQueueStatus('Matchmaking online em breve — iniciando modo offline...');
-      setTimeout(() => {
-        setQueueStatus(null);
-        navigate(`/game?mode=${modeKey}`);
-      }, 1800);
+
+    const token = tokenStorage.get();
+    if (!token) {
+      navigate('/login', { replace: true });
       return;
     }
-    navigate(`/game?mode=${modeKey}`);
+
+    setEntryInFlight(true);
+    setQueueStatus(
+      `Debitando entrada · ${modeKey.toUpperCase()} · ${formatCurrency(pot)}…`,
+    );
+
+    try {
+      const entry = await walletApi.matchEntry(token, modeKey, pot);
+      // Refresh the header balance immediately so the user sees the
+      // debit reflected even if the navigation is interrupted.
+      refreshWallet();
+      navigate(`/play/${modeKey}`, {
+        state: {
+          pot,
+          matchId: entry.matchId,
+          matchMode: mode,
+        },
+      });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        tokenStorage.clear();
+        navigate('/login', { replace: true });
+        return;
+      }
+      const msg =
+        err instanceof ApiError
+          ? err.message
+          : 'Falha ao entrar na partida. Tente novamente.';
+      setQueueStatus(msg);
+      window.setTimeout(() => setQueueStatus(null), 4500);
+      // If the failure is balance-related, surface the wallet modal so
+      // the user can top up without an extra click.
+      if (
+        err instanceof ApiError &&
+        /balance|saldo/i.test(err.message)
+      ) {
+        setWalletModalOpen(true);
+      }
+      setEntryInFlight(false);
+      return;
+    }
+    // On success we navigated away — no need to clear in-flight, this
+    // component is about to unmount.
   }
 
   async function handleLogout() {

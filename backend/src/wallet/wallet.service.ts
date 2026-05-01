@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -103,6 +104,10 @@ export class WalletService {
    * Returns a Pix BRCode (Copia-e-Cola) so the UI can display it for the
    * user to scan/paste. The code is fictitious sandbox data — no funds
    * will settle until a real gateway is wired to `confirmDeposit`.
+   *
+   * Policy: deposits do NOT require `emailVerified` — the friction is
+   * deliberately concentrated at withdraw time (see `requestWithdraw`),
+   * so a new account can top-up and play immediately.
    */
   async initiateDeposit(
     userId: string,
@@ -110,14 +115,6 @@ export class WalletService {
     idempotencyKey: string,
   ): Promise<DepositIntent> {
     this.assertPositive(amount);
-
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { emailVerified: true },
-    });
-    if (!user?.emailVerified) {
-      throw new ForbiddenException('Email not verified. Verify your email before making deposits.');
-    }
 
     await this.requireWalletDirect(userId);
 
@@ -303,6 +300,45 @@ export class WalletService {
         throw e;
       }
     });
+  }
+
+  // ── Dev-only: simulate payment gateway callback ───────────────────────────
+
+  /**
+   * Dev-only shortcut that lets a user confirm their own PENDING deposit
+   * without a real payment gateway webhook. Verifies the transaction
+   * belongs to the caller, then delegates to the idempotent
+   * `confirmDeposit()` which does the actual crediting.
+   *
+   * The controller gates this behind `NODE_ENV !== 'production'`, so this
+   * method is unreachable in production builds.
+   */
+  async simulateDepositConfirmationForUser(
+    userId: string,
+    transactionId: string,
+  ): Promise<BalanceDto> {
+    const tx = await this.prisma.transaction.findUnique({
+      where: { id: transactionId },
+      select: { userId: true, type: true, status: true },
+    });
+
+    if (!tx) throw new NotFoundException('Transaction not found');
+    if (tx.userId !== userId) {
+      // Don't leak existence of other users' transactions.
+      throw new NotFoundException('Transaction not found');
+    }
+    if (tx.type !== TransactionType.DEPOSIT) {
+      throw new BadRequestException('Transaction is not a deposit');
+    }
+    if (tx.status === TransactionStatus.FAILED) {
+      throw new BadRequestException('Cannot simulate confirmation on a FAILED deposit');
+    }
+
+    // Idempotent — `confirmDeposit` early-returns if already COMPLETED.
+    await this.confirmDeposit(transactionId);
+
+    // Return fresh balance so the client can update its header instantly.
+    return this.getBalance(userId);
   }
 
   // ── Internal: called by payment gateway webhook (not in controller) ────────
@@ -495,6 +531,88 @@ export class WalletService {
 
       return { settled: true, payout };
     });
+  }
+
+  // ── Public match flow (called by Lobby + game UI) ─────────────────────────
+
+  /**
+   * Allocates a new `matchId` and locks the entry fee for the user.
+   *
+   * The matchId is server-generated so a malicious client can't replay
+   * an old id to settle a new match for free. Returns the fresh balance
+   * so the lobby can update its header without an extra round-trip.
+   *
+   * Idempotency is implicit: every call generates a new matchId, so two
+   * clicks on "Play" produce two separate bets (which is correct — the
+   * user really did want two rooms). The caller is expected to wait for
+   * the response before navigating.
+   */
+  async startMatchForUser(
+    userId: string,
+    mode: string,
+    amount: number,
+  ): Promise<{ matchId: string; balance: number; locked: number }> {
+    this.assertPositive(amount);
+    // The DTO validates `mode` is one of the public keys; we re-check
+    // here defensively since the service can also be called from tests
+    // / internal code that bypasses validation pipes.
+    if (!['hunt-hunt', 'big-fish', 'private'].includes(mode)) {
+      throw new BadRequestException(`Unknown match mode: ${mode}`);
+    }
+
+    const matchId = randomUUID();
+    await this.processBetEntry(userId, amount, matchId);
+    const bal = await this.getBalance(userId);
+
+    return { matchId, balance: bal.balance, locked: bal.locked };
+  }
+
+  /**
+   * Settles a match for the user. Looks up the original BET amount from
+   * the database (never trust the client for financial inputs) and then
+   * delegates to the idempotent `processMatchResult`.
+   *
+   * Applies a paranoid payout cap: payout ≤ bet × MAX_PAYOUT_MULT. This
+   * caps damage from a compromised client — with the current modes the
+   * largest legitimate multiplier is ~50× (Hunt-Hunt cash-out from 99
+   * kills), so 100× leaves comfortable headroom while bounding loss.
+   *
+   * In production this entire endpoint should move behind an authoritative
+   * game server. The matchId model already supports that migration.
+   */
+  async settleMatchForUser(
+    userId: string,
+    matchId: string,
+    payout: number,
+  ): Promise<{ balance: number; locked: number; payout: number }> {
+    if (payout < 0) throw new BadRequestException('payout cannot be negative');
+
+    const bet = await this.prisma.transaction.findFirst({
+      where: {
+        userId,
+        matchId,
+        type: TransactionType.BET,
+        status: TransactionStatus.COMPLETED,
+      },
+    });
+    if (!bet) {
+      throw new BadRequestException('No active bet for this match');
+    }
+
+    const betAmount = Number(bet.amount);
+    const MAX_PAYOUT_MULT = 100;
+    if (payout > betAmount * MAX_PAYOUT_MULT) {
+      throw new BadRequestException(
+        `Payout exceeds the maximum allowed (${MAX_PAYOUT_MULT}x bet)`,
+      );
+    }
+
+    // processMatchResult is idempotent: a second call with the same matchId
+    // returns `{ alreadySettled: true }` without touching balances.
+    await this.processMatchResult(userId, matchId, betAmount, payout);
+    const bal = await this.getBalance(userId);
+
+    return { balance: bal.balance, locked: bal.locked, payout };
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────

@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -144,20 +143,17 @@ describe('WalletService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('throws ForbiddenException when email is not verified', async () => {
+    it('does NOT require emailVerified (policy: email gate is withdraw-only)', async () => {
+      // Unverified user — deposits must still succeed so new accounts can top
+      // up before completing email confirmation.
       mockPrisma.user.findUnique.mockResolvedValue({ emailVerified: false });
+      mockPrisma.transaction.create.mockResolvedValue(makeTxRecord());
 
-      await expect(
-        service.initiateDeposit('user-1', 10, 'key-1'),
-      ).rejects.toThrow(ForbiddenException);
-    });
+      const result = await service.initiateDeposit('user-1', 10, 'key-1');
 
-    it('throws ForbiddenException when user record is missing', async () => {
-      mockPrisma.user.findUnique.mockResolvedValue(null);
-
-      await expect(
-        service.initiateDeposit('user-1', 10, 'key-1'),
-      ).rejects.toThrow(ForbiddenException);
+      expect(result.status).toBe('PENDING');
+      expect(result.transactionId).toBe('tx-1');
+      expect(mockPrisma.transaction.create).toHaveBeenCalledTimes(1);
     });
   });
 
