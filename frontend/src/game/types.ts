@@ -60,6 +60,31 @@ export interface Snake {
    */
   sprintDropAccum: number;
 
+  /**
+   * Cumulative mass absorbed over the snake's lifetime in this match.
+   * Increments on every pellet consumed — does NOT decrease when mass
+   * is lost (sprint drain, Big Fish drain). Drives the account/season
+   * XP award at end-of-match (1 XP per 10 units).
+   */
+  massIngested: number;
+
+  /**
+   * Number of rival snakes this snake has killed in the match. Engine
+   * increments on every `KillEvent` where this snake is the killer.
+   * Surfaced via the snapshot so the HUD (Hunt-Hunt kill counter) and
+   * the wallet settlement (50 XP per kill) can read the same number.
+   */
+  killCount: number;
+
+  /**
+   * Cosmetic float in [0, 1] — lower is better (CS:GO wear convention).
+   * The renderer modulates the snake's opacity / visual weathering from
+   * this. All snakes carry one so future visual effects can apply to
+   * bots too, but right now only the player's float is surfaced in the
+   * snapshot (`selfFloatValue`).
+   */
+  floatValue: number;
+
   // ── Body ───────────────────────────────────────────────────────────────
   /** Breadcrumb trail, head at [0]. */
   trail: { x: number; y: number }[];
@@ -128,6 +153,21 @@ export interface WorldSnapshot {
   selfY: number;
   /** ms remaining under ghost protection (0 if over). */
   selfGhostMsLeft: number;
+  /**
+   * Lifetime pellet mass consumed by the player in this match. Passed
+   * to `walletApi.matchSettle` so the backend can compute XP (1 per 10).
+   * Distinct from `selfMass` (the live body mass) — `selfMass` drops
+   * during drain while this counter only grows.
+   */
+  selfMassIngested: number;
+  /**
+   * Kills attributed to the player. Mirrors `huntHunt.killCount` for HH
+   * mode but is also populated in Big Fish / private modes so the
+   * settlement XP award has a single source of truth.
+   */
+  selfKillCount: number;
+  /** Float value of the player's equipped skin in [0, 1]. */
+  selfFloatValue: number;
 
   leaderboard: LeaderboardEntry[];
 

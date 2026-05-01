@@ -30,6 +30,7 @@ interface PlayLocationState {
   pot?: number;
   matchId?: string;
   matchMode?: 'online' | 'offline';
+  playerColor?: string;
 }
 
 /** Reads the per-mode payout off the engine's final snapshot. */
@@ -67,6 +68,7 @@ export default function Play() {
     () => ({
       pot: typeof state.pot === 'number' ? state.pot : null,
       matchId: typeof state.matchId === 'string' ? state.matchId : null,
+      playerColor: typeof state.playerColor === 'string' ? state.playerColor : undefined,
     }),
     // location.state is captured once at mount; subsequent changes are
     // ignored on purpose.
@@ -103,7 +105,10 @@ export default function Play() {
 
       const payout = computePayout(final);
       try {
-        await walletApi.matchSettle(token, matchId, payout);
+        await walletApi.matchSettle(token, matchId, payout, {
+          massIngested: final.selfMassIngested,
+          kills: final.selfKillCount,
+        });
       } catch (err) {
         // Settlement failure shouldn't trap the user on the game page.
         // The backend lock can be reclaimed later (the matchId record
@@ -137,6 +142,7 @@ export default function Play() {
       playerName={auth.username}
       pot={matchInfo.pot}
       matchId={matchInfo.matchId}
+      playerColor={matchInfo.playerColor}
       onExit={handleExit}
     />
   );

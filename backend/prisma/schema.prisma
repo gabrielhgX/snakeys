@@ -16,10 +16,27 @@ model User {
   emailVerificationToken           String?              @unique
   emailVerificationTokenExpiresAt  DateTime?
   createdAt                        DateTime             @default(now())
+
+  // ── Progression ───────────────────────────────────────────────────────
+  // `accountXp` is permanent / cross-season. `seasonXp` is what drives
+  // the Battle Pass level and is what gets reset by the admin action at
+  // each season rollover. Both increment by the same rules at runtime
+  // (see ProgressionService) so the only meaningful difference is the
+  // reset semantics.
+  accountXp     Int    @default(0)
+  seasonXp      Int    @default(0)
+
+  // FK to the currently-equipped UserItem of type SKIN. Not enforced as
+  // a strict relation field because Prisma struggles with the
+  // bidirectional UserItem.equippedBy back-relation when `userItems` is
+  // already present. We validate in service code instead.
+  equippedSkinId String? @unique
+
   wallet                           Wallet?
   transactions                     Transaction[]
   userItems                        UserItem[]
   listings                         MarketplaceListing[]
+  battlePassClaims                 UserBattlePassClaim[]
 }
 
 model Wallet {
@@ -94,6 +111,19 @@ enum ListingStatus {
   CANCELLED
 }
 
+// Catalog of games in the platform. Skins / cosmetics are tied to a
+// `gameId` so the same account + Battle Pass progress can host multiple
+// games over time. Cross-platform cosmetics (e.g. profile frames that
+// apply everywhere) leave `Item.gameId` null.
+model Game {
+  id          String   @id  // slug: "snakeys", "pong-royale", etc.
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  items       Item[]
+}
+
 model Item {
   id          String     @id @default(uuid())
   name        String
@@ -101,20 +131,37 @@ model Item {
   type        ItemType
   rarity      Rarity
   imageUrl    String?
+  // null = platform-wide (e.g. PROFILE_FRAME, profile cosmetic). Otherwise
+  // the cosmetic is scoped to one game's renderer.
+  gameId      String?
   createdAt   DateTime   @default(now())
+  game        Game?      @relation(fields: [gameId], references: [id])
   userItems   UserItem[]
+
+  @@index([gameId])
+  @@index([type, rarity])
 }
 
+// Owned instance of an `Item`. Each row is a unique mint with:
+//  - `serialNumber`: globally autoincrementing — used for collector
+//    pride ("snake skin #42 of all time") and also as a stable sort key
+//    in the marketplace UI.
+//  - `floatValue`: random in [0, 1] at mint time. Lower is better (CS:GO
+//    convention). Renderer modulates opacity / weathering by this.
+//  - `obtainedAt` doubles as the spec's `mintedAt`.
 model UserItem {
-  id         String              @id @default(uuid())
-  userId     String
-  itemId     String
-  obtainedAt DateTime            @default(now())
-  user       User                @relation(fields: [userId], references: [id])
-  item       Item                @relation(fields: [itemId], references: [id])
-  listing    MarketplaceListing?
+  id            String              @id @default(uuid())
+  userId        String
+  itemId        String
+  serialNumber  Int                 @unique @default(autoincrement())
+  floatValue    Float               @default(0)
+  obtainedAt    DateTime            @default(now())
+  user          User                @relation(fields: [userId], references: [id])
+  item          Item                @relation(fields: [itemId], references: [id])
+  listing       MarketplaceListing?
 
   @@index([userId])
+  @@index([serialNumber])
 }
 
 model MarketplaceListing {
@@ -130,4 +177,61 @@ model MarketplaceListing {
 
   @@index([sellerId])
   @@index([status])
+}
+
+// ─── Battle Pass ──────────────────────────────────────────────────────────────
+
+enum RewardType {
+  BALANCE     // adds R$ to wallet.balanceAvailable
+  XP_BONUS    // adds flat XP to both account + season counters
+  SKIN        // mints a UserItem with random float from a pool
+}
+
+// Single source of truth for what each Battle Pass level grants. The
+// row is identified by `level` (1..100) so a season rollover only has
+// to flip a config flag elsewhere — the rewards table itself doesn't
+// change unless ops wants different rewards for a new season.
+//
+// Discriminated columns:
+//   - rewardType=BALANCE  → uses `balanceAmount`
+//   - rewardType=XP_BONUS → uses `xpAmount`
+//   - rewardType=SKIN     → uses `skinGameId` + `skinRarity` to pick a
+//                            random Item to mint. Both are nullable for
+//                            the other reward types.
+//
+// Seed script is responsible for filling all 100 rows.
+model BattlePassReward {
+  id            String     @id @default(uuid())
+  level         Int        @unique
+  rewardType    RewardType
+  // Populated for BALANCE rewards (R$, decimal). Null otherwise.
+  balanceAmount Decimal?   @db.Decimal(18, 8)
+  // Populated for XP_BONUS rewards (flat int). Null otherwise.
+  xpAmount      Int?
+  // Populated for SKIN rewards: filters the Item pool before random pick.
+  // `skinGameId` null → cross-game (rare; e.g. universal profile skin).
+  skinGameId    String?
+  skinRarity    Rarity?
+  description   String?
+  createdAt     DateTime   @default(now())
+  claims        UserBattlePassClaim[]
+}
+
+// Records that user X claimed reward Y. The `(userId, level)` unique
+// pair is the idempotency key — calling `claim` twice on the same level
+// is a no-op once a row exists.
+model UserBattlePassClaim {
+  id          String           @id @default(uuid())
+  userId      String
+  level       Int
+  claimedAt   DateTime         @default(now())
+  // Snapshot of what was actually granted (e.g. for SKIN, the
+  // UserItem.id minted at claim time). Useful for audits / re-rendering
+  // a claim history without re-deriving from the reward table.
+  grantedRef  String?
+  user        User             @relation(fields: [userId], references: [id])
+  reward      BattlePassReward @relation(fields: [level], references: [level])
+
+  @@unique([userId, level])
+  @@index([userId])
 }

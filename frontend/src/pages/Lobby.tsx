@@ -21,13 +21,19 @@ import {
   Users,
   Wallet,
 } from 'lucide-react';
+import InventoryTab, { rarityToSnakeColor } from '../components/InventoryTab';
+import LevelBadge from '../components/LevelBadge';
 import WalletModal from '../components/WalletModal';
 import {
   ApiError,
   authApi,
+  cosmeticsApi,
+  progressionApi,
   tokenStorage,
   usernameStorage,
   walletApi,
+  type CosmeticInstanceDto,
+  type ProgressionDto,
   type WalletDto,
 } from '../lib/api';
 
@@ -129,6 +135,8 @@ export default function Lobby() {
   // Guards against double-click on a mode card while the entry POST is
   // in flight — without this the user could be debited twice in a row.
   const [entryInFlight, setEntryInFlight] = useState(false);
+  const [progression, setProgression] = useState<ProgressionDto | null>(null);
+  const [equippedItem, setEquippedItem] = useState<CosmeticInstanceDto | null>(null);
 
   const refreshWallet = useCallback(() => {
     const token = tokenStorage.get();
@@ -154,11 +162,14 @@ export default function Lobby() {
 
   // Initial load + redirect guard.
   useEffect(() => {
-    if (!tokenStorage.get()) {
+    const token = tokenStorage.get();
+    if (!token) {
       navigate('/login', { replace: true });
       return;
     }
     refreshWallet();
+    progressionApi.me(token).then(setProgression).catch(() => {});
+    cosmeticsApi.getEquipped(token).then(setEquippedItem).catch(() => {});
   }, [navigate, refreshWallet]);
 
   const balanceNumber = useMemo(
@@ -191,6 +202,15 @@ export default function Lobby() {
       return;
     }
 
+    // Resolve the skin colour before touching the network — any TypeError
+    // from a malformed equippedItem stays here, never inside the try/catch
+    // that wraps the financial transaction (which would show "Falha ao
+    // entrar na partida" even though the debit already happened).
+    const playerColor =
+      equippedItem?.item?.rarity != null
+        ? rarityToSnakeColor(equippedItem.item.rarity)
+        : undefined;
+
     setEntryInFlight(true);
     setQueueStatus(
       `Debitando entrada · ${modeKey.toUpperCase()} · ${formatCurrency(pot)}…`,
@@ -206,6 +226,7 @@ export default function Lobby() {
           pot,
           matchId: entry.matchId,
           matchMode: mode,
+          playerColor,
         },
       });
     } catch (err) {
@@ -254,6 +275,7 @@ export default function Lobby() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         username={username}
+        accountXp={progression?.account.xp ?? 0}
         balanceLabel={balanceLabel}
         balanceError={walletError}
         onBalanceClick={() => setWalletModalOpen(true)}
@@ -290,6 +312,10 @@ export default function Lobby() {
                 onPlay={handlePlay}
                 queueStatus={queueStatus}
               />
+            ) : activeTab === 'inventory' ? (
+              <InventoryTab
+                onEquipChange={(item) => setEquippedItem(item)}
+              />
             ) : (
               <ComingSoon tab={activeTab} />
             )}
@@ -305,6 +331,7 @@ function TopBar({
   activeTab,
   onTabChange,
   username,
+  accountXp,
   balanceLabel,
   balanceError,
   onBalanceClick,
@@ -313,6 +340,7 @@ function TopBar({
   activeTab: TabId;
   onTabChange: (t: TabId) => void;
   username: string;
+  accountXp: number;
   balanceLabel: string;
   balanceError: string | null;
   onBalanceClick: () => void;
@@ -369,6 +397,8 @@ function TopBar({
           <ChevronDown className="h-3.5 w-3.5 text-amber-300/70 transition group-hover:translate-y-0.5 group-hover:text-amber-200" />
         </button>
         <div className="hidden items-center gap-2.5 rounded-full border border-white/5 bg-base-700/60 py-1 pl-2 pr-3 sm:flex">
+          <LevelBadge accountXp={accountXp} size="sm" />
+          <div className="h-4 w-px bg-white/10" />
           <Avatar name={username} />
           <span className="max-w-[140px] truncate text-sm font-medium text-zinc-200">
             {username}

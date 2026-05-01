@@ -202,6 +202,22 @@ function drawSnakes(
   }
 }
 
+/**
+ * Maps a cosmetic wear value (float in [0, 1]) to a body-alpha multiplier.
+ *
+ *   • 0.0 (factory-new)  → 1.00 alpha  — crisp, fully-rendered skin
+ *   • 0.5 (field-tested) → 0.80 alpha
+ *   • 1.0 (battle-scarred) → 0.60 alpha  — visibly translucent, "worn"
+ *
+ * Linear in float; shows direct value without making even high-wear skins
+ * unusable. Kept as a pure function so a future inventory preview can
+ * mirror the in-game look from the same math.
+ */
+export function floatToBodyAlpha(floatValue: number): number {
+  const clamped = Math.max(0, Math.min(1, floatValue));
+  return 1.0 - 0.4 * clamped;
+}
+
 function drawOneSnake(
   ctx: CanvasRenderingContext2D,
   snake: Snake,
@@ -231,7 +247,17 @@ function drawOneSnake(
 
   const isGhost = now < snake.ghostUntil;
   const prevAlpha = ctx.globalAlpha;
-  if (isGhost) ctx.globalAlpha = 0.32;
+
+  // Opacity stacking priority:
+  //   1. ghost protection dominates (32% — it's safety-critical feedback)
+  //   2. otherwise, player's equipped skin float drives body alpha so
+  //      worn skins feel worn. Bots pass through at 100% so their random
+  //      floats don't pollute the user's visual language.
+  if (isGhost) {
+    ctx.globalAlpha = 0.32;
+  } else if (!snake.isBot) {
+    ctx.globalAlpha = floatToBodyAlpha(snake.floatValue);
+  }
 
   // Build body path once, stroke twice (outline then fill).
   ctx.beginPath();
@@ -250,10 +276,11 @@ function drawOneSnake(
   ctx.strokeStyle = snake.color;
   ctx.stroke();
 
+  // Head + label render above the body but still respect alpha; reset to
+  // 1.0 only AFTER the label so the name stays pin-sharp at high wear.
   drawSnakeHead(ctx, snake, radius);
-  drawSnakeLabel(ctx, snake);
-
   ctx.globalAlpha = prevAlpha;
+  drawSnakeLabel(ctx, snake);
 }
 
 function drawSnakeHead(

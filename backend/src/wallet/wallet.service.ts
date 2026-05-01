@@ -4,12 +4,17 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { TransactionStatus, TransactionType } from '@prisma/client';
 import { Decimal, PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  MatchXpAward,
+  ProgressionService,
+} from '../progression/progression.service';
 import { generatePixCode } from './pix-code.util';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -41,7 +46,12 @@ export interface BalanceDto {
 
 @Injectable()
 export class WalletService {
-  constructor(private prisma: PrismaService) {}
+  private readonly logger = new Logger(WalletService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private progression: ProgressionService,
+  ) {}
 
   // ── Public read endpoints ──────────────────────────────────────────────────
 
@@ -584,7 +594,15 @@ export class WalletService {
     userId: string,
     matchId: string,
     payout: number,
-  ): Promise<{ balance: number; locked: number; payout: number }> {
+    stats?: { massIngested?: number; kills?: number },
+  ): Promise<{
+    balance: number;
+    locked: number;
+    payout: number;
+    /** Progression delta. `null` on an idempotent replay (alreadySettled)
+     *  because we only credit XP on the first settlement. */
+    xp: MatchXpAward | null;
+  }> {
     if (payout < 0) throw new BadRequestException('payout cannot be negative');
 
     const bet = await this.prisma.transaction.findFirst({
@@ -609,10 +627,44 @@ export class WalletService {
 
     // processMatchResult is idempotent: a second call with the same matchId
     // returns `{ alreadySettled: true }` without touching balances.
-    await this.processMatchResult(userId, matchId, betAmount, payout);
-    const bal = await this.getBalance(userId);
+    const settleResult = await this.processMatchResult(
+      userId,
+      matchId,
+      betAmount,
+      payout,
+    );
 
-    return { balance: bal.balance, locked: bal.locked, payout };
+    // Only credit XP on the *first* successful settlement. The wallet path
+    // uses the `fee:${matchId}:${userId}` idempotency row as the gate; if
+    // that row already exists, `processMatchResult` returns alreadySettled
+    // and we skip the XP award so a retry can't double-credit.
+    //
+    // Failure mode: if `processMatchResult` succeeds but `awardMatchXp`
+    // throws, the user loses this match's XP (no retry on subsequent
+    // `settle` because the gate now says alreadySettled). Acceptable for
+    // MVP — total-loss scenario requires both a wallet commit and a
+    // subsequent Prisma outage inside the same tick. Authoritative game
+    // server will fold both writes into one transaction.
+    let xp: MatchXpAward | null = null;
+    if ('settled' in settleResult && settleResult.settled) {
+      try {
+        xp = await this.progression.awardMatchXp(
+          userId,
+          stats?.massIngested ?? 0,
+          stats?.kills ?? 0,
+        );
+      } catch (err) {
+        // Log but don't rethrow — user already got their money; XP is the
+        // lesser concern. Ops alert would fire off this log line.
+        this.logger.error(
+          `XP award failed for user ${userId} match ${matchId}: ${(err as Error).message}`,
+          (err as Error).stack,
+        );
+      }
+    }
+
+    const bal = await this.getBalance(userId);
+    return { balance: bal.balance, locked: bal.locked, payout, xp };
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────

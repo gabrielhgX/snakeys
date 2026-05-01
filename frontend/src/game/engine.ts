@@ -188,6 +188,10 @@ export interface CreateWorldParams {
   /** R$ pot the player committed (debited upstream by the lobby). All
    *  bots in this world receive the same pot — segregation by value. */
   pot: number;
+  /** Float value of the player's equipped skin in [0, 1]. Default 0
+   *  (factory-new / no skin equipped). Bots get a random float so any
+   *  per-bot float-driven effects in the future behave correctly. */
+  selfFloatValue?: number;
   seed?: number;
 }
 
@@ -197,6 +201,7 @@ export function createWorld(params: CreateWorldParams): World {
     playerColor = '#4ea888',
     mode,
     pot,
+    selfFloatValue = 0,
     seed,
   } = params;
 
@@ -235,6 +240,11 @@ export function createWorld(params: CreateWorldParams): World {
     sprinting: false,
     mass: 10,
     sprintDropAccum: 0,
+    massIngested: 0,
+    killCount: 0,
+    // Clamp to [0, 1] defensively — bad backend data shouldn't corrupt
+    // the renderer's alpha math below.
+    floatValue: Math.min(1, Math.max(0, selfFloatValue)),
     trail: seedTrail(0, 0, selfHeading, bodyLengthOf(10)),
     alive: true,
     ghostUntil: 0,
@@ -318,6 +328,10 @@ function createBot(rng: () => number, i: number, pot: number): Snake {
     sprinting: false,
     mass,
     sprintDropAccum: 0,
+    massIngested: mass, // spawn mass counts as "ingested" so the bot
+                        // has plausible lifetime metrics if surfaced
+    killCount: 0,
+    floatValue: rng(),  // uniform across bots; only drives future vfx
     trail: seedTrail(headX, headY, heading, bodyLengthOf(mass)),
     alive: true,
     ghostUntil: 0,
@@ -481,6 +495,10 @@ function updateSnake(
     p.alive = false;
     world.grid.remove(idx, p.x, p.y);
     snake.mass += p.mass;
+    // Track lifetime intake separately from live mass. `massIngested`
+    // never decreases — that's the whole point; XP is awarded on what
+    // you *gained*, not on what survived until the end of the round.
+    snake.massIngested += p.mass;
     // Respawn uniform pellet in the same slot to keep density stable.
     const np = spawnFieldPellet(world.rng);
     world.pellets[idx] = np;
@@ -655,6 +673,25 @@ function killSnake(
   if (!snake.alive) return;
   snake.alive = false;
   snake.killedBy = killerId;
+
+  // Credit the killer's per-snake kill counter. Keeps Hunt-Hunt's
+  // counter and the settlement-XP kill count in sync from one source.
+  // We do it here (not in mode.update) so every mode gets the count
+  // without each controller needing a kill-event listener.
+  if (killerId) {
+    if (killerId === world.self.id) {
+      world.self.killCount++;
+    } else {
+      // Bot kill — linear scan is fine at <=50 bots. Cache on snake id
+      // later if the count grows meaningfully.
+      for (let b = 0; b < world.bots.length; b++) {
+        if (world.bots[b].id === killerId) {
+          world.bots[b].killCount++;
+          break;
+        }
+      }
+    }
+  }
 
   world.events.push({
     type: 'kill',

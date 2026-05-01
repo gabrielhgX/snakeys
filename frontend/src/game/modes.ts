@@ -81,7 +81,6 @@ class HuntHuntMode implements ModeController {
   readonly kind: GameModeKey = 'hunt-hunt';
 
   private accumulatedValue = 0;
-  private killCount = 0;
   private cashoutStartedAt: number | null = null;
   private cashedOut = false;
   private settledValue: number | null = null;
@@ -96,18 +95,21 @@ class HuntHuntMode implements ModeController {
   update(world: World, _dt: number): void {
     if (this.ended) return;
 
-    // ── Consume kill events from this frame ──────────────────────
+    // ── Consume kill events from this frame ──────────────
     // The engine cleared `events` at the start of this tick, so anything
     // still here is from kills resolved during this frame's collision
     // pass. We credit the player's accumulator only when *they* are the
     // killer — bot↔bot kills are observed but worthless economically.
+    //
+    // Kill *counting* lives in the engine (`Snake.killCount`), so we
+    // don't track it redundantly here — the snapshot reads it from
+    // `world.self.killCount` directly.
     const events = world.events;
     for (let i = 0; i < events.length; i++) {
       const ev = events[i];
       if (ev.type !== 'kill') continue;
       if (ev.killerId === world.self.id) {
         this.accumulatedValue += ev.victimPot;
-        this.killCount++;
       }
     }
 
@@ -141,17 +143,13 @@ class HuntHuntMode implements ModeController {
           );
 
     return {
-      mode: 'hunt-hunt',
-      elapsedMs: world.now,
-      selfAlive: world.self.alive,
-      selfMass: world.self.mass,
-      selfX: world.self.headX,
-      selfY: world.self.headY,
-      selfGhostMsLeft: Math.max(0, world.self.ghostUntil - world.now),
-      leaderboard: buildLeaderboard(world),
+      ...baseSnapshot(world, 'hunt-hunt', world.now),
       huntHunt: {
         accumulatedValue: this.accumulatedValue,
-        killCount: this.killCount,
+        // Mirrors `selfKillCount` but scoped under the HH bucket so the
+        // HUD can read it without a mode check. Both come from the same
+        // `Snake.killCount` source on the engine side.
+        killCount: world.self.killCount,
         cashoutStartedAt: this.cashoutStartedAt,
         cashoutMsLeft,
         cashedOut: this.cashedOut,
@@ -296,14 +294,7 @@ class BigFishMode implements ModeController {
     const drainRate = BIG_FISH_MAX_DRAIN * t * t;
     const selfRank = world.self.alive ? this.computeSelfRank(world) : null;
     return {
-      mode: 'big-fish',
-      elapsedMs: elapsed,
-      selfAlive: world.self.alive,
-      selfMass: world.self.mass,
-      selfX: world.self.headX,
-      selfY: world.self.headY,
-      selfGhostMsLeft: Math.max(0, world.self.ghostUntil - world.now),
-      leaderboard: buildLeaderboard(world),
+      ...baseSnapshot(world, 'big-fish', elapsed),
       bigFish: {
         timeLeftMs: Math.max(0, BIG_FISH_DURATION_MS - elapsed),
         drainRate,
@@ -376,14 +367,7 @@ class CasualMode implements ModeController {
 
   snapshot(world: World): WorldSnapshot {
     return {
-      mode: 'private',
-      elapsedMs: world.now,
-      selfAlive: world.self.alive,
-      selfMass: world.self.mass,
-      selfX: world.self.headX,
-      selfY: world.self.headY,
-      selfGhostMsLeft: Math.max(0, world.self.ghostUntil - world.now),
-      leaderboard: buildLeaderboard(world),
+      ...baseSnapshot(world, 'private', world.now),
       ended: this.ended,
       endReason: this.endReason,
     };
@@ -394,6 +378,43 @@ class CasualMode implements ModeController {
     this.ended = true;
     this.endReason = 'quit';
   }
+}
+
+// ─── Shared snapshot helper ───────────────────────────────────────────────────
+// Builds the fields that every mode contributes to WorldSnapshot. Each mode's
+// `snapshot()` spreads this and adds its own bucket (huntHunt / bigFish) plus
+// `ended` / `endReason`.
+function baseSnapshot(
+  world: World,
+  mode: GameModeKey,
+  elapsedMs: number,
+): Pick<
+  WorldSnapshot,
+  | 'mode'
+  | 'elapsedMs'
+  | 'selfAlive'
+  | 'selfMass'
+  | 'selfX'
+  | 'selfY'
+  | 'selfGhostMsLeft'
+  | 'selfMassIngested'
+  | 'selfKillCount'
+  | 'selfFloatValue'
+  | 'leaderboard'
+> {
+  return {
+    mode,
+    elapsedMs,
+    selfAlive: world.self.alive,
+    selfMass: world.self.mass,
+    selfX: world.self.headX,
+    selfY: world.self.headY,
+    selfGhostMsLeft: Math.max(0, world.self.ghostUntil - world.now),
+    selfMassIngested: world.self.massIngested,
+    selfKillCount: world.self.killCount,
+    selfFloatValue: world.self.floatValue,
+    leaderboard: buildLeaderboard(world),
+  };
 }
 
 // ─── Leaderboard ──────────────────────────────────────────────────────────────

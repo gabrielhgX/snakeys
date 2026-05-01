@@ -120,10 +120,35 @@ export interface MatchEntryDto {
   locked: number;
 }
 
+/**
+ * Live counter breakdown returned by `matchSettle`. Lets the post-match
+ * UI animate a +XP popup and a level-up toast without a second round
+ * trip to `/progression/me`.
+ *
+ * `xp` is `null` when the server replayed an idempotent settlement
+ * (user already settled this match) — no XP was credited this time.
+ */
+export interface MatchXpSnapshot {
+  awarded: number;
+  account: { before: LevelInfoDto; after: LevelInfoDto };
+  season: { before: LevelInfoDto; after: LevelInfoDto };
+}
+
+export interface LevelInfoDto {
+  level: number;
+  xp: number;
+  xpForCurrentLevel: number;
+  xpForNextLevel: number;
+  xpIntoLevel: number;
+  xpToNextLevel: number;
+  isMaxLevel: boolean;
+}
+
 export interface MatchSettleDto {
   balance: number;
   locked: number;
   payout: number;
+  xp: MatchXpSnapshot | null;
 }
 
 export const walletApi = {
@@ -188,15 +213,34 @@ export const walletApi = {
    * computed `payout` (which may be 0 for a full loss). Idempotent on
    * `matchId` — calling twice returns the same final balance.
    *
+   * `massIngested` + `kills` drive progression XP. Both are optional —
+   * passing `undefined` for either means "no XP credit for that axis"
+   * and lets legacy callers keep working while the engine wiring rolls
+   * out.
+   *
    * In production, settlement is the responsibility of an authoritative
    * game server; this client-driven path is acceptable only because the
    * current build runs single-player vs bots locally.
    */
-  matchSettle: (token: string, matchId: string, payout: number) =>
+  matchSettle: (
+    token: string,
+    matchId: string,
+    payout: number,
+    stats?: { massIngested?: number; kills?: number },
+  ) =>
     request<MatchSettleDto>(
       'POST',
       '/wallet/match/settle',
-      { matchId, payout },
+      {
+        matchId,
+        payout,
+        ...(stats?.massIngested !== undefined
+          ? { massIngested: Math.floor(stats.massIngested) }
+          : {}),
+        ...(stats?.kills !== undefined
+          ? { kills: Math.floor(stats.kills) }
+          : {}),
+      },
       token,
     ),
 };
@@ -205,6 +249,151 @@ export const walletApi = {
 export const userApi = {
   me: (token: string) =>
     request<AuthUser>('GET', '/users/me', undefined, token),
+};
+
+// ── Progression ───────────────────────────────────────────────────────────────
+/**
+ * Shape returned by `GET /progression/me`. Two independent counters:
+ * `account` is permanent, `season` is the one that drives the Battle
+ * Pass and is wiped by admin between seasons.
+ */
+export interface ProgressionDto {
+  account: LevelInfoDto;
+  season: LevelInfoDto;
+}
+
+export const progressionApi = {
+  me: (token: string) =>
+    request<ProgressionDto>('GET', '/progression/me', undefined, token),
+};
+
+// ── Cosmetics ─────────────────────────────────────────────────────────────────
+/**
+ * UserItem as surfaced by the cosmetics read endpoints. The catalog
+ * entry is embedded under `item` — nested so the renderer has one
+ * object to pass around without flattening + re-nesting.
+ */
+export interface CosmeticInstanceDto {
+  id: string;
+  serialNumber: number;
+  floatValue: number;
+  obtainedAt: string;
+  item: {
+    id: string;
+    name: string;
+    type: 'SKIN' | 'HAT' | 'EMOTE' | 'PROFILE_BACKGROUND' | 'PROFILE_FRAME';
+    rarity: 'COMMON' | 'RARE' | 'EPIC' | 'LEGENDARY';
+    imageUrl: string | null;
+    gameId: string | null;
+  };
+}
+
+export const cosmeticsApi = {
+  /**
+   * Returns the currently-equipped skin, or `null` if the user isn't
+   * wearing anything. The lobby calls this on boot to decide what
+   * `floatValue` to thread into the game engine.
+   */
+  getEquipped: (token: string) =>
+    request<CosmeticInstanceDto | null>(
+      'GET',
+      '/cosmetics/equipped',
+      undefined,
+      token,
+    ),
+
+  equip: (token: string, userItemId: string) =>
+    request<CosmeticInstanceDto>(
+      'POST',
+      '/cosmetics/equip',
+      { userItemId },
+      token,
+    ),
+
+  unequip: (token: string) =>
+    request<{ equippedSkinId: null }>(
+      'DELETE',
+      '/cosmetics/equip',
+      undefined,
+      token,
+    ),
+};
+
+// ── Inventory ─────────────────────────────────────────────────────────────────
+export interface InventoryDto {
+  equippedSkinId: string | null;
+  items: Array<
+    CosmeticInstanceDto & {
+      listing: { id: string; price: string; status: string } | null;
+    }
+  >;
+}
+
+export const inventoryApi = {
+  list: (token: string) =>
+    request<InventoryDto>('GET', '/inventory', undefined, token),
+};
+
+// ── Battle Pass ───────────────────────────────────────────────────────────────
+export type RewardTypeDto = 'BALANCE' | 'XP_BONUS' | 'SKIN';
+
+export interface BattlePassRewardRowDto {
+  level: number;
+  rewardType: RewardTypeDto;
+  balanceAmount: number | null;
+  xpAmount: number | null;
+  skinGameId: string | null;
+  skinRarity: 'COMMON' | 'RARE' | 'EPIC' | 'LEGENDARY' | null;
+  description: string | null;
+  unlocked: boolean;
+  claimed: boolean;
+  claimable: boolean;
+}
+
+export interface BattlePassStatusDto {
+  season: LevelInfoDto;
+  rewards: BattlePassRewardRowDto[];
+  claimableCount: number;
+  claims: Array<{ level: number; claimedAt: string; grantedRef: string | null }>;
+}
+
+/**
+ * Discriminated payload returned by `claim`. Use `grant.type` in the UI
+ * switch to decide which celebration to play. Mirrors the backend's
+ * `BattlePassService.claim` return type.
+ */
+export type BattlePassGrantDto =
+  | { type: 'BALANCE'; amount: number; newBalance: number }
+  | {
+      type: 'XP_BONUS';
+      amount: number;
+      newAccountXp: number;
+      newSeasonXp: number;
+    }
+  | {
+      type: 'SKIN';
+      userItemId: string;
+      serialNumber: number;
+      floatValue: number;
+      itemName: string;
+    };
+
+export interface BattlePassClaimResponseDto {
+  level: number;
+  grant: BattlePassGrantDto;
+}
+
+export const battlePassApi = {
+  status: (token: string) =>
+    request<BattlePassStatusDto>('GET', '/battle-pass/me', undefined, token),
+
+  claim: (token: string, level: number) =>
+    request<BattlePassClaimResponseDto>(
+      'POST',
+      '/battle-pass/claim',
+      { level },
+      token,
+    ),
 };
 
 // ── Token storage ─────────────────────────────────────────────────────────────

@@ -40,6 +40,13 @@ export interface GameCanvasProps {
   /** Server-issued match id from `walletApi.matchEntry`. Threaded back
    *  through `onExit` so the page above can call `matchSettle`. */
   matchId: string;
+  /**
+   * Cosmetic wear value of the player's equipped skin in [0, 1]. Passed
+   * directly to the engine's `createWorld` so the renderer can modulate
+   * body opacity (CS:GO convention: lower is better). Default 0 renders
+   * as pristine / fully opaque.
+   */
+  selfFloatValue?: number;
   /** Called once with the final snapshot when the match ends. May be
    *  async — the parent typically awaits a settlement POST inside. */
   onExit: (finalSnapshot: WorldSnapshot) => void | Promise<void>;
@@ -68,6 +75,7 @@ export default function GameCanvas({
   playerName,
   playerColor,
   pot,
+  selfFloatValue,
   onExit,
 }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -90,6 +98,7 @@ export default function GameCanvas({
       playerColor,
       mode,
       pot,
+      selfFloatValue,
     });
     const modeCtl = createMode(mode, world);
     engineRef.current = {
@@ -107,7 +116,11 @@ export default function GameCanvas({
     return () => {
       engineRef.current = null;
     };
-  }, [mode, playerName, playerColor, pot]);
+    // `selfFloatValue` changing mid-match is exotic (user equipped a new
+    // skin while playing, which we don't support) — but we include it in
+    // the dep array for correctness. A mid-match change will reset the
+    // world; acceptable MVP behavior.
+  }, [mode, playerName, playerColor, pot, selfFloatValue]);
 
   // ─── Canvas sizing (DPR-aware) ─────────────────────────────────────────
   useEffect(() => {

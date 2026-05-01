@@ -111,6 +111,7 @@ export class WalletController {
       req.user.id,
       dto.matchId,
       dto.payout,
+      { massIngested: dto.massIngested, kills: dto.kills },
     );
   }
 }
