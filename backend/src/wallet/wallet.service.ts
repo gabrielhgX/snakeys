@@ -17,6 +17,18 @@ import {
 } from '../progression/progression.service';
 import { generatePixCode } from './pix-code.util';
 
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+// Ghost-protection duration in Hunt-Hunt: 60 s from match start.
+// A settlement with payout > 0 before this threshold is physically impossible
+// (the snake can't accumulate kills during ghost), so we reject it server-side
+// to close the client-bypass exploit documented in 01_AUDITORIA_SEGURANCA §1.3.
+const HUNT_HUNT_GHOST_MS = 60_000;
+
+// Hard floor on match duration regardless of mode.  Settling a match that
+// lasted fewer than 10 seconds is a strong signal of a forged request.
+const MIN_MATCH_DURATION_MS = 10_000;
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface DepositIntent {
@@ -39,7 +51,7 @@ export interface WithdrawIntent {
 
 export interface BalanceDto {
   balance: number; // balanceAvailable, ready to spend
-  locked: number; // balanceLocked (in active bets / pending withdraws)
+  locked: number;  // balanceLocked (in active bets / pending withdraws)
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -110,14 +122,6 @@ export class WalletService {
    * Creates a PENDING deposit request. Does NOT touch balances.
    * A real payment gateway webhook would later call confirmDeposit().
    * Idempotent: same idempotencyKey always returns the same record.
-   *
-   * Returns a Pix BRCode (Copia-e-Cola) so the UI can display it for the
-   * user to scan/paste. The code is fictitious sandbox data — no funds
-   * will settle until a real gateway is wired to `confirmDeposit`.
-   *
-   * Policy: deposits do NOT require `emailVerified` — the friction is
-   * deliberately concentrated at withdraw time (see `requestWithdraw`),
-   * so a new account can top-up and play immediately.
    */
   async initiateDeposit(
     userId: string,
@@ -134,10 +138,8 @@ export class WalletService {
 
     if (existing) {
       if (existing.userId !== userId) {
-        // Idempotency key belongs to another user — hard rejection
         throw new ConflictException('Idempotency key already used');
       }
-
       return this.buildDepositIntent(existing, true);
     }
 
@@ -154,16 +156,11 @@ export class WalletService {
 
       return this.buildDepositIntent(transaction, false);
     } catch (e) {
-      // Two concurrent requests with the same idempotencyKey both passed the
-      // pre-check. The unique constraint caught the second one — return the
-      // record created by the first request instead of propagating a 500.
       if (e instanceof PrismaClientKnownRequestError && e.code === 'P2002') {
         const raced = await this.prisma.transaction.findUnique({
           where: { idempotencyKey },
         });
-        if (raced) {
-          return this.buildDepositIntent(raced, true);
-        }
+        if (raced) return this.buildDepositIntent(raced, true);
       }
       throw e;
     }
@@ -175,9 +172,6 @@ export class WalletService {
   ): DepositIntent {
     const amount = Number(tx.amount);
     const pixCode = generatePixCode({ amount, transactionId: tx.id });
-    // Pix codes in Brazil typically expire after ~15 minutes. We base expiry
-    // off the transaction's createdAt so repeated calls return the same
-    // deadline, not a sliding window.
     const expiresAt = new Date(tx.createdAt.getTime() + 15 * 60 * 1000);
 
     return {
@@ -197,18 +191,12 @@ export class WalletService {
   /**
    * Requests a withdrawal.
    *
-   * Flow (atomic):
-   *   1. Verify the submitted CPF matches the one on file (anti-fraud).
-   *   2. Verify available balance covers the requested amount.
-   *   3. Move `amount` from `balanceAvailable` → `balanceLocked` so the
-   *      user can't spend it elsewhere while the ops team processes.
-   *   4. Create a PENDING `WITHDRAW` transaction.
-   *
-   * A real payment-ops worker would later call `confirmWithdraw()` (debit
-   * locked + mark COMPLETED) or `rejectWithdraw()` (unlock + mark FAILED).
-   * Both are left as follow-ups — this endpoint only creates the request.
-   *
-   * Idempotent on `idempotencyKey`.
+   * SECURITY (Sprint 1 — Issue 1.2):
+   * The wallet row is locked with SELECT FOR UPDATE at the start of the
+   * transaction.  This serializes concurrent withdraw requests for the same
+   * user: the second request blocks on the lock, then re-reads the balance
+   * after the first commits — preventing the TOCTOU race where two threads
+   * both pass the `available >= amount` check on a stale read.
    */
   async requestWithdraw(
     userId: string,
@@ -218,9 +206,6 @@ export class WalletService {
   ): Promise<WithdrawIntent> {
     this.assertPositive(amount);
 
-    // CPF comparison must be on normalized digits. The DTO already strips
-    // non-digits, but we re-normalize defensively in case the service is
-    // called from a context that bypassed validation (tests, internal code).
     const normalizedCpf = cpf.replace(/\D/g, '');
 
     const user = await this.prisma.user.findUnique({
@@ -234,12 +219,9 @@ export class WalletService {
       );
     }
     if (user.cpf !== normalizedCpf) {
-      // Deliberately vague message so an attacker learns nothing from a
-      // mismatch — but we use 401 (auth/identity failure) not 400.
       throw new UnauthorizedException('CPF does not match the account on file');
     }
 
-    // Fast path for idempotent retry.
     const existing = await this.prisma.transaction.findUnique({
       where: { idempotencyKey },
     });
@@ -256,20 +238,21 @@ export class WalletService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const wallet = await this.requireWallet(tx, userId);
-      const available = new Decimal(wallet.balanceAvailable);
+      // ── SPRINT 1 FIX (Issue 1.2): Lock wallet row before read ──────────
+      // SELECT FOR UPDATE acquires a row-level write lock.  Any concurrent
+      // transaction attempting to lock the same row will block here until
+      // this transaction commits or rolls back, eliminating the TOCTOU race.
+      const wallet = await this.lockWallet(tx, userId);
 
-      if (available.lessThan(amount)) {
+      if (wallet.balanceAvailable.lessThan(amount)) {
         throw new BadRequestException('Insufficient available balance');
       }
 
-      // Lock the funds so they can't be spent by a concurrent bet / another
-      // withdraw request while ops processes this one.
       await tx.wallet.update({
         where: { userId },
         data: {
-          balanceAvailable: available.minus(amount),
-          balanceLocked: new Decimal(wallet.balanceLocked).plus(amount),
+          balanceAvailable: wallet.balanceAvailable.minus(amount),
+          balanceLocked:    wallet.balanceLocked.plus(amount),
         },
       });
 
@@ -292,12 +275,7 @@ export class WalletService {
         };
       } catch (e) {
         if (e instanceof PrismaClientKnownRequestError && e.code === 'P2002') {
-          // Concurrent duplicate: someone else inside this Prisma $transaction
-          // couldn't have raced (they'd block on the row lock), so this must
-          // have been created between our pre-check and the lock — fetch it.
-          const raced = await tx.transaction.findUnique({
-            where: { idempotencyKey },
-          });
+          const raced = await tx.transaction.findUnique({ where: { idempotencyKey } });
           if (raced) {
             return {
               transactionId: raced.id,
@@ -314,15 +292,6 @@ export class WalletService {
 
   // ── Dev-only: simulate payment gateway callback ───────────────────────────
 
-  /**
-   * Dev-only shortcut that lets a user confirm their own PENDING deposit
-   * without a real payment gateway webhook. Verifies the transaction
-   * belongs to the caller, then delegates to the idempotent
-   * `confirmDeposit()` which does the actual crediting.
-   *
-   * The controller gates this behind `NODE_ENV !== 'production'`, so this
-   * method is unreachable in production builds.
-   */
   async simulateDepositConfirmationForUser(
     userId: string,
     transactionId: string,
@@ -333,10 +302,7 @@ export class WalletService {
     });
 
     if (!tx) throw new NotFoundException('Transaction not found');
-    if (tx.userId !== userId) {
-      // Don't leak existence of other users' transactions.
-      throw new NotFoundException('Transaction not found');
-    }
+    if (tx.userId !== userId) throw new NotFoundException('Transaction not found');
     if (tx.type !== TransactionType.DEPOSIT) {
       throw new BadRequestException('Transaction is not a deposit');
     }
@@ -344,19 +310,12 @@ export class WalletService {
       throw new BadRequestException('Cannot simulate confirmation on a FAILED deposit');
     }
 
-    // Idempotent — `confirmDeposit` early-returns if already COMPLETED.
     await this.confirmDeposit(transactionId);
-
-    // Return fresh balance so the client can update its header instantly.
     return this.getBalance(userId);
   }
 
-  // ── Internal: called by payment gateway webhook (not in controller) ────────
+  // ── Internal: called by payment gateway webhook ────────────────────────────
 
-  /**
-   * Confirms a pending deposit and credits the balance.
-   * Must only be called from a verified payment gateway webhook handler.
-   */
   async confirmDeposit(transactionId: string): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
       const deposit = await tx.transaction.findUnique({
@@ -372,14 +331,13 @@ export class WalletService {
         throw new BadRequestException('Cannot confirm a failed deposit');
       }
 
-      const wallet = await this.requireWallet(tx, deposit.userId);
+      // Lock before crediting to prevent concurrent double-confirm races.
+      const wallet = await this.lockWallet(tx, deposit.userId);
 
       await tx.wallet.update({
         where: { userId: deposit.userId },
         data: {
-          balanceAvailable: new Decimal(wallet.balanceAvailable).plus(
-            deposit.amount,
-          ),
+          balanceAvailable: wallet.balanceAvailable.plus(deposit.amount),
         },
       });
 
@@ -390,16 +348,24 @@ export class WalletService {
     });
   }
 
-  // ── Internal: called by game server (not in controller) ───────────────────
+  // ── Internal: called by game server ──────────────────────────────────────
 
   /**
    * Locks the bet amount for a match entry.
-   * Idempotent: repeated calls for the same match/user are safe.
+   *
+   * SECURITY (Sprint 1 — Issue 1.2):
+   * Uses lockWallet() (SELECT FOR UPDATE) to serialize concurrent bet
+   * attempts for the same user, preventing double-lock of the same slot.
+   *
+   * @param mode  Stored in referenceId on the BET transaction so that
+   *              settleMatchForUser() can enforce ghost-period rules without
+   *              an extra lookup or a client-supplied (untrusted) parameter.
    */
   async processBetEntry(
     userId: string,
     amount: number,
     matchId: string,
+    mode?: string,
   ) {
     this.assertPositive(amount);
 
@@ -411,29 +377,30 @@ export class WalletService {
       });
       if (existing) return existing;
 
-      const wallet = await this.requireWallet(tx, userId);
-      const available = new Decimal(wallet.balanceAvailable);
+      // ── SPRINT 1 FIX (Issue 1.2): Lock wallet before balance check ──────
+      const wallet = await this.lockWallet(tx, userId);
 
-      if (available.lessThan(amount)) {
+      if (wallet.balanceAvailable.lessThan(amount)) {
         throw new BadRequestException('Insufficient available balance');
       }
 
       await tx.wallet.update({
         where: { userId },
         data: {
-          balanceAvailable: available.minus(amount),
-          balanceLocked: new Decimal(wallet.balanceLocked).plus(amount),
+          balanceAvailable: wallet.balanceAvailable.minus(amount),
+          balanceLocked:    wallet.balanceLocked.plus(amount),
         },
       });
 
       return tx.transaction.create({
         data: {
           userId,
-          type: TransactionType.BET,
+          type:           TransactionType.BET,
           amount,
           matchId,
           idempotencyKey,
-          status: TransactionStatus.COMPLETED,
+          referenceId:    mode ?? null,
+          status:         TransactionStatus.COMPLETED,
         },
       });
     });
@@ -442,11 +409,17 @@ export class WalletService {
   /**
    * Settles a match result for a user.
    *
-   * @param betAmount  The amount that was locked by processBetEntry.
-   * @param payout     The amount to credit to available balance.
-   *                   Pass 0 for a full loss; pass betAmount + profit for a win.
+   * SECURITY (Sprint 1 — Issue 1.1 — Double Settlement):
+   * The PRIMARY idempotency guard is a MatchSettlement row inserted at the
+   * top of the transaction BEFORE any wallet mutation.  PostgreSQL holds a
+   * write-intent lock on the unique index (userId, matchId) from the moment
+   * of INSERT.  A concurrent transaction attempting the same pair will:
+   *   1. Block waiting for the lock
+   *   2. After commit, fail with P2002 (unique violation)
+   *   3. Return { alreadySettled: true } without touching the wallet
    *
-   * Idempotent: repeated calls for the same match/user are safe.
+   * The old feeKey uniqueness check on the Transaction table is kept as a
+   * secondary belt-and-suspenders guard.
    */
   async processMatchResult(
     userId: string,
@@ -461,30 +434,41 @@ export class WalletService {
     const winKey = `win:${matchId}:${userId}`;
 
     return this.prisma.$transaction(async (tx) => {
-      // Idempotency guard: if the fee record exists the full settlement already ran
-      const existing = await tx.transaction.findUnique({
+      // ── SPRINT 1 FIX (Issue 1.1): MatchSettlement atomic guard ──────────
+      // First write in the transaction — acquires a lock on the unique index
+      // entry so concurrent calls cannot race through to the wallet update.
+      try {
+        await (tx as any).matchSettlement.create({
+          data: { userId, matchId, payout: new Decimal(payout) },
+        });
+      } catch (e) {
+        if (e instanceof PrismaClientKnownRequestError && e.code === 'P2002') {
+          return { alreadySettled: true };
+        }
+        throw e;
+      }
+
+      // Secondary guard on Transaction table.
+      const existingFee = await tx.transaction.findUnique({
         where: { idempotencyKey: feeKey },
       });
-      if (existing) return { alreadySettled: true };
+      if (existingFee) return { alreadySettled: true };
 
-      // Verify user actually entered this match before allowing settlement
+      // Verify the user actually entered this match.
       const betRecord = await tx.transaction.findFirst({
         where: {
           userId,
           matchId,
-          type: TransactionType.BET,
+          type:   TransactionType.BET,
           status: TransactionStatus.COMPLETED,
         },
       });
 
       if (!betRecord) {
-        throw new BadRequestException(
-          'User did not participate in this match',
-        );
+        throw new BadRequestException('User did not participate in this match');
       }
 
-      // Use the amount recorded in the DB — never trust the caller's value for
-      // financial math. The caller's betAmount is validated only as a sanity check.
+      // Use the DB-recorded amount — never trust the caller for financial math.
       const recordedBet = new Decimal(betRecord.amount);
       if (!recordedBet.equals(new Decimal(betAmount))) {
         throw new BadRequestException(
@@ -492,49 +476,41 @@ export class WalletService {
         );
       }
 
-      const wallet = await this.requireWallet(tx, userId);
-      const locked = new Decimal(wallet.balanceLocked);
+      // ── SPRINT 1 FIX (Issue 1.2): Lock wallet before mutation ───────────
+      const wallet = await this.lockWallet(tx, userId);
 
-      if (locked.lessThan(recordedBet)) {
-        throw new BadRequestException(
-          'Insufficient locked balance to settle match',
-        );
+      if (wallet.balanceLocked.lessThan(recordedBet)) {
+        throw new BadRequestException('Insufficient locked balance to settle match');
       }
-
-      // Consume the locked bet (always — win or loss)
-      const newLocked = locked.minus(recordedBet);
-      const newAvailable = new Decimal(wallet.balanceAvailable).plus(payout);
 
       await tx.wallet.update({
         where: { userId },
         data: {
-          balanceLocked: newLocked,
-          balanceAvailable: newAvailable,
+          balanceLocked:    wallet.balanceLocked.minus(recordedBet),
+          balanceAvailable: wallet.balanceAvailable.plus(payout),
         },
       });
 
-      // Record the fee (consumed from locked)
       await tx.transaction.create({
         data: {
           userId,
-          type: TransactionType.FEE,
-          amount: recordedBet,
+          type:           TransactionType.FEE,
+          amount:         recordedBet,
           matchId,
           idempotencyKey: feeKey,
-          status: TransactionStatus.COMPLETED,
+          status:         TransactionStatus.COMPLETED,
         },
       });
 
-      // Record the payout (credited to available) only if non-zero
       if (payout > 0) {
         await tx.transaction.create({
           data: {
             userId,
-            type: TransactionType.WIN,
-            amount: payout,
+            type:           TransactionType.WIN,
+            amount:         payout,
             matchId,
             idempotencyKey: winKey,
-            status: TransactionStatus.COMPLETED,
+            status:         TransactionStatus.COMPLETED,
           },
         });
       }
@@ -547,15 +523,9 @@ export class WalletService {
 
   /**
    * Allocates a new `matchId` and locks the entry fee for the user.
-   *
-   * The matchId is server-generated so a malicious client can't replay
-   * an old id to settle a new match for free. Returns the fresh balance
-   * so the lobby can update its header without an extra round-trip.
-   *
-   * Idempotency is implicit: every call generates a new matchId, so two
-   * clicks on "Play" produce two separate bets (which is correct — the
-   * user really did want two rooms). The caller is expected to wait for
-   * the response before navigating.
+   * The matchId is always server-generated — clients cannot reuse old IDs.
+   * The game mode is forwarded to processBetEntry() where it is stored in
+   * the BET transaction's referenceId for later ghost-period validation.
    */
   async startMatchForUser(
     userId: string,
@@ -563,32 +533,29 @@ export class WalletService {
     amount: number,
   ): Promise<{ matchId: string; balance: number; locked: number }> {
     this.assertPositive(amount);
-    // The DTO validates `mode` is one of the public keys; we re-check
-    // here defensively since the service can also be called from tests
-    // / internal code that bypasses validation pipes.
     if (!['hunt-hunt', 'big-fish', 'private'].includes(mode)) {
       throw new BadRequestException(`Unknown match mode: ${mode}`);
     }
 
     const matchId = randomUUID();
-    await this.processBetEntry(userId, amount, matchId);
+    await this.processBetEntry(userId, amount, matchId, mode);
     const bal = await this.getBalance(userId);
 
     return { matchId, balance: bal.balance, locked: bal.locked };
   }
 
   /**
-   * Settles a match for the user. Looks up the original BET amount from
-   * the database (never trust the client for financial inputs) and then
-   * delegates to the idempotent `processMatchResult`.
+   * Settles a match for the user (client-driven path).
    *
-   * Applies a paranoid payout cap: payout ≤ bet × MAX_PAYOUT_MULT. This
-   * caps damage from a compromised client — with the current modes the
-   * largest legitimate multiplier is ~50× (Hunt-Hunt cash-out from 99
-   * kills), so 100× leaves comfortable headroom while bounding loss.
+   * SECURITY (Sprint 1 — Issue 1.3 — Ghost Period Validation):
+   * The game mode is read from the BET transaction's referenceId (written
+   * by startMatchForUser → processBetEntry at match start).  For hunt-hunt,
+   * any settlement that claims payout > 0 within the first 60 seconds is
+   * rejected: during ghost the snake cannot accumulate kills or pot, making
+   * a positive payout physically impossible in a legitimate client.
    *
-   * In production this entire endpoint should move behind an authoritative
-   * game server. The matchId model already supports that migration.
+   * A hard floor of MIN_MATCH_DURATION_MS (10 s) blocks instant-settle
+   * forgeries regardless of mode or payout value.
    */
   async settleMatchForUser(
     userId: string,
@@ -599,8 +566,6 @@ export class WalletService {
     balance: number;
     locked: number;
     payout: number;
-    /** Progression delta. `null` on an idempotent replay (alreadySettled)
-     *  because we only credit XP on the first settlement. */
     xp: MatchXpAward | null;
   }> {
     if (payout < 0) throw new BadRequestException('payout cannot be negative');
@@ -609,15 +574,38 @@ export class WalletService {
       where: {
         userId,
         matchId,
-        type: TransactionType.BET,
+        type:   TransactionType.BET,
         status: TransactionStatus.COMPLETED,
       },
+      select: { amount: true, createdAt: true, referenceId: true },
     });
     if (!bet) {
       throw new BadRequestException('No active bet for this match');
     }
 
     const betAmount = Number(bet.amount);
+    const elapsedMs = Date.now() - bet.createdAt.getTime();
+    const matchMode = bet.referenceId; // 'hunt-hunt' | 'big-fish' | 'private' | null
+
+    // ── SPRINT 1 FIX (Issue 1.3): Ghost-period and min-duration guards ───
+    if (elapsedMs < MIN_MATCH_DURATION_MS) {
+      throw new ForbiddenException(
+        `Match ended too quickly — settlement rejected. ` +
+        `Elapsed: ${elapsedMs}ms, minimum: ${MIN_MATCH_DURATION_MS}ms.`,
+      );
+    }
+
+    if (matchMode === 'hunt-hunt' && elapsedMs < HUNT_HUNT_GHOST_MS && payout > 0) {
+      // Ghost protection: snake is invulnerable AND cannot accumulate kills.
+      // A positive payout within this window signals a tampered request.
+      throw new ForbiddenException(
+        `Cannot claim payout during Hunt-Hunt ghost protection ` +
+        `(${HUNT_HUNT_GHOST_MS / 1000}s). ` +
+        `Elapsed: ${Math.floor(elapsedMs / 1000)}s.`,
+      );
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     const MAX_PAYOUT_MULT = 100;
     if (payout > betAmount * MAX_PAYOUT_MULT) {
       throw new BadRequestException(
@@ -625,8 +613,6 @@ export class WalletService {
       );
     }
 
-    // processMatchResult is idempotent: a second call with the same matchId
-    // returns `{ alreadySettled: true }` without touching balances.
     const settleResult = await this.processMatchResult(
       userId,
       matchId,
@@ -634,17 +620,6 @@ export class WalletService {
       payout,
     );
 
-    // Only credit XP on the *first* successful settlement. The wallet path
-    // uses the `fee:${matchId}:${userId}` idempotency row as the gate; if
-    // that row already exists, `processMatchResult` returns alreadySettled
-    // and we skip the XP award so a retry can't double-credit.
-    //
-    // Failure mode: if `processMatchResult` succeeds but `awardMatchXp`
-    // throws, the user loses this match's XP (no retry on subsequent
-    // `settle` because the gate now says alreadySettled). Acceptable for
-    // MVP — total-loss scenario requires both a wallet commit and a
-    // subsequent Prisma outage inside the same tick. Authoritative game
-    // server will fold both writes into one transaction.
     let xp: MatchXpAward | null = null;
     if ('settled' in settleResult && settleResult.settled) {
       try {
@@ -654,16 +629,13 @@ export class WalletService {
           stats?.kills ?? 0,
         );
       } catch (err) {
-        // Log but don't rethrow — user already got their money; XP is the
-        // lesser concern. Ops alert would fire off this log line.
         this.logger.error(
           `XP award failed for user ${userId} match ${matchId}: ${(err as Error).message}`,
           (err as Error).stack,
         );
       }
 
-      // Increment usageCount on the equipped skin — non-critical, fire-and-forget.
-      // A failure here must never roll back the wallet settlement.
+      // Increment usageCount on equipped skin — fire-and-forget, non-critical.
       this.prisma.user
         .findUnique({ where: { id: userId }, select: { equippedSkinId: true } })
         .then((u) => {
@@ -687,6 +659,44 @@ export class WalletService {
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
+  /**
+   * Acquires a PostgreSQL row-level write lock on the Wallet row and
+   * returns the current balances as Decimal instances.
+   *
+   * USAGE: Call this as the FIRST operation inside a prisma.$transaction()
+   * block whenever the subsequent code will read-then-update balances.
+   *
+   * WHY FOR UPDATE:
+   *   At the default READ COMMITTED isolation, two concurrent transactions
+   *   can both read the same stale balance before either writes.  SELECT
+   *   FOR UPDATE forces the second transaction to wait at this line until
+   *   the first commits, guaranteeing it reads the post-commit balance.
+   *
+   * The pg driver returns NUMERIC columns as strings; we wrap in Decimal to
+   * preserve the full 18,8 precision without floating-point drift.
+   */
+  private async lockWallet(
+    tx: any,
+    userId: string,
+  ): Promise<{ balanceAvailable: Decimal; balanceLocked: Decimal }> {
+    const rows = await tx.$queryRaw<
+      Array<{ balanceAvailable: string; balanceLocked: string }>
+    >`
+      SELECT "balanceAvailable", "balanceLocked"
+      FROM   "Wallet"
+      WHERE  "userId" = ${userId}
+      FOR UPDATE
+    `;
+
+    if (rows.length === 0) throw new NotFoundException('Wallet not found');
+
+    return {
+      balanceAvailable: new Decimal(rows[0].balanceAvailable),
+      balanceLocked:    new Decimal(rows[0].balanceLocked),
+    };
+  }
+
+  /** Read-only wallet fetch — use only for non-mutating checks. */
   private async requireWallet(tx: any, userId: string) {
     const wallet = await tx.wallet.findUnique({ where: { userId } });
     if (!wallet) throw new NotFoundException('Wallet not found');

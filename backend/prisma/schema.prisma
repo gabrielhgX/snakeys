@@ -55,6 +55,8 @@ model Transaction {
   amount         Decimal           @db.Decimal(18, 8)
   status         TransactionStatus @default(COMPLETED)
   createdAt      DateTime          @default(now())
+  // For BET transactions: stores the game mode ('hunt-hunt' | 'big-fish' | 'private').
+  // Used by settleMatchForUser() to enforce ghost-period validation without an extra table.
   referenceId    String?
   matchId        String?
   idempotencyKey String?           @unique
@@ -62,6 +64,23 @@ model Transaction {
 
   @@index([userId])
   @@index([matchId])
+}
+
+// Primary idempotency guard for match settlement.
+// A unique row per (userId, matchId) is created at the START of processMatchResult(),
+// inside the same PostgreSQL transaction as the wallet update.  Because PostgreSQL
+// acquires a write-intent lock on the unique index entry immediately on INSERT, a
+// second concurrent transaction trying to create the same row will BLOCK until the
+// first commits, then fail with P2002 — ensuring the wallet is debited exactly once.
+model MatchSettlement {
+  id        String   @id @default(uuid())
+  userId    String
+  matchId   String
+  payout    Decimal  @db.Decimal(18, 8)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, matchId])
+  @@index([userId])
 }
 
 enum TransactionType {
