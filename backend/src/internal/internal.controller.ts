@@ -22,17 +22,21 @@ export class InternalController {
   @Post('match/entry')
   @HttpCode(HttpStatus.OK)
   processBetEntry(@Body() dto: MatchEntryDto) {
-    return this.walletService.processBetEntry(dto.userId, dto.amount, dto.matchId);
+    // Pass dto.mode so processBetEntry() stores it in the Match lifecycle record.
+    return this.walletService.processBetEntry(dto.userId, dto.amount, dto.matchId, dto.mode);
   }
 
   @Post('match/result')
   @HttpCode(HttpStatus.OK)
   processMatchResult(@Body() dto: MatchResultDto) {
+    // Pass dto.finalMass so processMatchResult() stores it in Match.finalMass
+    // for later comparison against client-reported mass in settleMatchForUser().
     return this.walletService.processMatchResult(
       dto.userId,
       dto.matchId,
       dto.betAmount,
       dto.payout,
+      dto.finalMass,
     );
   }
 

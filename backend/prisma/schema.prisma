@@ -122,6 +122,10 @@ model Match {
   mode      String      // 'hunt-hunt' | 'big-fish' | 'private'
   status    MatchStatus @default(ACTIVE)
   betAmount Decimal     @db.Decimal(18, 8)
+  // SPRINT 3: set by processMatchResult() when the game-server reports its
+  // authoritative final mass.  Null for offline (client-driven) matches.
+  // Used by settleMatchForUser() to detect client-reported mass discrepancies.
+  finalMass Decimal?    @db.Decimal(18, 8)
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
   user      User        @relation(fields: [userId], references: [id])

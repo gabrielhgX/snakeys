@@ -6,7 +6,6 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { MatchStatus, TransactionStatus, TransactionType } from '@prisma/client';
 import { Decimal, PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
@@ -219,8 +218,11 @@ export class WalletService {
         'Email not verified. Verify your email before requesting withdrawals.',
       );
     }
+    // SPRINT 3 (Task 3 — Withdrawal Guard): CPF mismatch returns 403 Forbidden,
+    // not 401 — the user IS authenticated (JWT valid) but is NOT authorized to
+    // withdraw to a CPF other than their own (identity/fraud prevention).
     if (user.cpf !== normalizedCpf) {
-      throw new UnauthorizedException('CPF does not match the account on file');
+      throw new ForbiddenException('CPF does not match the account on file');
     }
 
     const existing = await this.prisma.transaction.findUnique({
@@ -438,10 +440,11 @@ export class WalletService {
    * secondary belt-and-suspenders guard.
    */
   async processMatchResult(
-    userId: string,
-    matchId: string,
-    betAmount: number,
-    payout: number,
+    userId:     string,
+    matchId:    string,
+    betAmount:  number,
+    payout:     number,
+    finalMass?: number,
   ) {
     this.assertPositive(betAmount);
     if (payout < 0) throw new BadRequestException('Payout cannot be negative');
@@ -531,12 +534,17 @@ export class WalletService {
         });
       }
 
-      // SPRINT 2 — mark the Match lifecycle record as SETTLED.
-      // updateMany with the ACTIVE filter is a no-op for matches that pre-date
-      // Sprint 2 (no Match row) or that the reconciler already marked ABANDONED.
+      // SPRINT 2/3 — mark the Match lifecycle record as SETTLED and persist the
+      // game-server's authoritative finalMass.  updateMany with the ACTIVE filter
+      // is a no-op for pre-Sprint-2 matches (no row) or reconciler-ABANDONED ones.
       await (tx as any).match.updateMany({
-        where:  { userId, matchId, status: MatchStatus.ACTIVE },
-        data:   { status: MatchStatus.SETTLED },
+        where: { userId, matchId, status: MatchStatus.ACTIVE },
+        data: {
+          status: MatchStatus.SETTLED,
+          // SPRINT 3: store game-server's serverMass so settleMatchForUser() can
+          // compare it against the client-reported massIngested and flag spoofing.
+          ...(finalMass !== undefined && { finalMass: new Decimal(finalMass) }),
+        },
       });
 
       return { settled: true, payout };
@@ -644,12 +652,43 @@ export class WalletService {
       payout,
     );
 
+    // ── SPRINT 3 (Task 4) — Mass discrepancy audit ────────────────────────────
+    // Look up the finalMass stored by processMatchResult() when the game-server
+    // called /internal/match/result.  For offline (client-driven) matches this
+    // field is null and we skip the comparison.
+    let massForXp = stats?.massIngested ?? 0;
+
+    const matchRecord = await this.prisma.match.findUnique({
+      where: { userId_matchId: { userId, matchId } },
+      select: { finalMass: true },
+    });
+
+    if (matchRecord?.finalMass != null) {
+      const serverMass = Number(matchRecord.finalMass);
+      const clientMass = stats?.massIngested ?? 0;
+      const discrepancy =
+        serverMass > 0 ? Math.abs(clientMass - serverMass) / serverMass : 0;
+
+      if (discrepancy > 0.05) {
+        // Log as a structured audit event — pipe this to the future AuditLogger.
+        this.logger.warn(
+          `[AUDIT] MASS_DISCREPANCY ` +
+          `userId=${userId} matchId=${matchId} ` +
+          `clientMass=${clientMass} serverMass=${serverMass} ` +
+          `discrepancy=${(discrepancy * 100).toFixed(1)}% ` +
+          `— overriding client value with serverMass for XP calculation`,
+        );
+        massForXp = serverMass; // ignore tampered client value
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     let xp: MatchXpAward | null = null;
     if ('settled' in settleResult && settleResult.settled) {
       try {
         xp = await this.progression.awardMatchXp(
           userId,
-          stats?.massIngested ?? 0,
+          massForXp,        // server-validated mass (or client mass if no discrepancy)
           stats?.kills ?? 0,
         );
       } catch (err) {

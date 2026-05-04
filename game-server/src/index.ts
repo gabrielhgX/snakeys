@@ -67,6 +67,17 @@ io.on('connection', async (socket: Socket) => {
     if (room.playerCount >= config.maxPlayersPerRoom) {
       waitingRoom = null;
       activeRooms.set(room.id, room);
+
+      // Wire the anti-cheat kick callback BEFORE room.start() so the game loop
+      // can use it from the very first tick.
+      room.onKickPlayer = (socketId: string, reason: string) => {
+        const target = io.sockets.sockets.get(socketId);
+        if (!target) return;
+        target.emit('kicked', { reason });
+        target.disconnect(true);
+        console.log(`[ANTICHEAT] socket ${socketId} kicked — reason: ${reason}`);
+      };
+
       await room.start();
       io.to(room.id).emit('match_start', { roomId: room.id, matchDurationMs: config.matchDurationMs });
     }
@@ -91,6 +102,24 @@ io.on('connection', async (socket: Socket) => {
     const room = activeRooms.get(roomId);
     if (!room) return;
     room.setSprinting(user.id, sprinting);
+  });
+
+  // ── pellet_eat — client claims it consumed a pellet ───────────────────────
+  // The server validates position before crediting mass (SPRINT 3 — Anti-Mass Spoof).
+  // Payload: { pelletId: string, headX: number, headY: number }
+  socket.on('pellet_eat', (data: { pelletId: string; headX: number; headY: number }) => {
+    const roomId = socket.data.roomId as string | undefined;
+    if (!roomId) return;
+    const room = activeRooms.get(roomId);
+    if (!room) return;
+
+    const eaten = room.validateAndEatPellet(user.id, data.pelletId, data.headX, data.headY);
+    if (eaten) {
+      // Acknowledge valid eat so the client can sync its local mass display
+      socket.emit('pellet_eaten', { pelletId: eaten.id, mass: eaten.mass });
+    }
+    // Silent rejection on invalid eat — no response prevents the client from
+    // knowing exactly where the validation threshold is.
   });
 
   // ── state_request — client polls for game snapshot ─────────────────────────

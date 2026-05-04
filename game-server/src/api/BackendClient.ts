@@ -12,21 +12,28 @@ export class BackendClient {
     });
   }
 
-  async processBetEntry(userId: string, amount: number, matchId: string): Promise<void> {
-    await this.http.post('/api/internal/match/entry', { userId, amount, matchId });
+  async processBetEntry(
+    userId:  string,
+    amount:  number,
+    matchId: string,
+    mode?:   string,
+  ): Promise<void> {
+    await this.http.post('/api/internal/match/entry', { userId, amount, matchId, mode });
   }
 
   async processMatchResult(
-    userId: string,
-    matchId: string,
-    betAmount: number,
-    payout: number,
+    userId:     string,
+    matchId:    string,
+    betAmount:  number,
+    payout:     number,
+    finalMass?: number,
   ): Promise<void> {
     await this.http.post('/api/internal/match/result', {
       userId,
       matchId,
       betAmount,
       payout,
+      finalMass,
     });
   }
 
