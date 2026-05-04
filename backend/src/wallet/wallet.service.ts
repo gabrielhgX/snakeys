@@ -23,6 +23,11 @@ import {
   MATCH_SETTLEMENT_QUEUE,
   MatchSettlementJobData,
 } from './queues/match-settlement.types';
+import {
+  KILL_PROCESSOR_JOB,
+  KILL_PROCESSOR_QUEUE,
+  KillProcessorJobData,
+} from './queues/kill-processor.types';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -72,6 +77,8 @@ export class WalletService {
     private readonly progression: ProgressionService,
     @InjectQueue(MATCH_SETTLEMENT_QUEUE)
     private readonly settlementQueue: Queue<MatchSettlementJobData>,
+    @InjectQueue(KILL_PROCESSOR_QUEUE)
+    private readonly killQueue: Queue<KillProcessorJobData>,
   ) {}
 
   // ── Public read endpoints ──────────────────────────────────────────────────
@@ -773,6 +780,90 @@ export class WalletService {
 
     const bal = await this.getBalance(userId);
     return { balance: bal.balance, locked: bal.locked, payout, xp };
+  }
+
+  // ── SPRINT 5 — Kill event pipeline ───────────────────────────────────────
+
+  /**
+   * Enqueues a kill event to the `kill-processor` BullMQ queue.
+   * Called by InternalController on POST /internal/kill.
+   *
+   * Returns immediately (202 Accepted semantics) — the KillProcessorWorker
+   * processes the job asynchronously with up to 3 retry attempts.
+   *
+   * jobId is deterministic: `kill:<matchId>:<victimId>`.  A victim can only
+   * die once per match, so a game-server retry produces the same jobId and
+   * BullMQ deduplicates it silently (existing non-failed jobs are not
+   * re-added when the same jobId is submitted again).
+   */
+  async enqueueKillEvent(
+    matchId:        string,
+    killerId:       string,
+    victimId:       string,
+    victimGrossPot: number,
+    rakeRate        = 0.10,
+  ): Promise<{ queued: boolean; jobId: string }> {
+    if (victimGrossPot < 0) throw new BadRequestException('victimGrossPot cannot be negative');
+
+    const job = await this.killQueue.add(
+      KILL_PROCESSOR_JOB,
+      { matchId, killerId, victimId, victimGrossPot, rakeRate },
+      {
+        jobId:            `kill:${matchId}:${victimId}`,
+        attempts:         3,
+        backoff:          { type: 'exponential', delay: 2_000 },
+        removeOnComplete: 200,
+        removeOnFail:     500,
+      },
+    );
+
+    return { queued: true, jobId: job.id as string };
+  }
+
+  /**
+   * Records a kill event in the `KillEvent` audit table.
+   * Called by KillProcessorWorker — runs inside a Prisma transaction.
+   *
+   * IDEMPOTENCY: `kill:<matchId>:<victimId>` is the unique key.  A victim
+   * can only die once per match, so a retry after a partial failure hits
+   * P2002 and returns `{ alreadyRecorded: true }` without side-effects.
+   *
+   * NOTE: this method does NOT touch wallet balances.  Kill pot accumulation
+   * is tracked in game-server memory and settled in bulk at match end via
+   * processMatchResult().  The KillEvent row provides an audit trail for
+   * reconciliation when matches are abandoned.
+   */
+  async processKillEvent(
+    matchId:        string,
+    killerId:       string,
+    victimId:       string,
+    victimGrossPot: number,
+    rakeRate        = 0.10,
+  ): Promise<{ alreadyRecorded: boolean; rake: number; netTransferred: number }> {
+    const idempotencyKey = `kill:${matchId}:${victimId}`;
+    const rake           = victimGrossPot * rakeRate;
+    const netTransferred = victimGrossPot - rake;
+
+    try {
+      await (this.prisma as any).killEvent.create({
+        data: {
+          matchId,
+          killerId,
+          victimId,
+          victimGrossPot: new Decimal(victimGrossPot),
+          rake:            new Decimal(rake),
+          netTransferred:  new Decimal(netTransferred),
+          idempotencyKey,
+        },
+      });
+    } catch (e) {
+      if (e instanceof PrismaClientKnownRequestError && e.code === 'P2002') {
+        return { alreadyRecorded: true, rake: 0, netTransferred: 0 };
+      }
+      throw e;
+    }
+
+    return { alreadyRecorded: false, rake, netTransferred };
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────

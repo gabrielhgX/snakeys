@@ -60,6 +60,12 @@ export interface PlayerState {
   mass:       number;
   serverMass: number;
 
+  // Accumulated pot in R$ for Hunt-Hunt kill-transfer accounting.
+  // Initialised to the room buy-in; grows when this player kills others.
+  // Used as `victimGrossPot` when this player is killed and their pot
+  // is reported to POST /internal/kill for the KillProcessorWorker.
+  accumulatedPot: number;
+
   position:  Vec2;
   lastPos:   Vec2;    // position at the previous tick — used for speed validation
   direction: Vec2;    // unit vector (normalised by server on receipt)
@@ -80,8 +86,9 @@ export function createPlayer(userId: string, socketId: string, email: string): P
     id:         userId,
     socketId,
     email,
-    mass:       100,
-    serverMass: 100,
+    mass:           100,
+    serverMass:     100,
+    accumulatedPot: 0,   // overwritten by GameRoom.addPlayer with the room's buyIn
     position:  { x: startX, y: startY },
     lastPos:   { x: startX, y: startY },
     direction: { x: 1, y: 0 },

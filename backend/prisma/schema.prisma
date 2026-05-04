@@ -79,6 +79,31 @@ model MatchSettlement {
   @@index([userId])
 }
 
+// Audit record for every kill event in a match.
+// Written asynchronously by KillProcessorWorker.  Does NOT move wallet
+// balances directly — that happens in processMatchResult() at match end.
+//
+// Idempotency: `kill:<matchId>:<victimId>` is unique because a player can
+// only die once per match.  A game-server retry produces P2002 → no-op.
+//
+// `victimGrossPot`  = victim's accumulated pot at the moment of death
+// `rake`            = house cut (10% of grossPot)
+// `netTransferred`  = pot transferred to killer (grossPot - rake)
+model KillEvent {
+  id              String   @id @default(uuid())
+  matchId         String
+  killerId        String
+  victimId        String
+  victimGrossPot  Decimal  @db.Decimal(18, 8)
+  rake            Decimal  @db.Decimal(18, 8)
+  netTransferred  Decimal  @db.Decimal(18, 8)
+  idempotencyKey  String   @unique  // kill:<matchId>:<victimId>
+  createdAt       DateTime @default(now())
+
+  @@index([matchId])
+  @@index([killerId])
+}
+
 enum TransactionType {
   DEPOSIT
   WITHDRAW

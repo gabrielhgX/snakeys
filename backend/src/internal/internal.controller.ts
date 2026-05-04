@@ -9,6 +9,7 @@ import {
 import { SkipThrottle } from '@nestjs/throttler';
 import { WalletService } from '../wallet/wallet.service';
 import { ConfirmDepositDto } from './dto/confirm-deposit.dto';
+import { KillEventDto } from './dto/kill-event.dto';
 import { MatchEntryDto } from './dto/match-entry.dto';
 import { MatchResultDto } from './dto/match-result.dto';
 import { InternalApiKeyGuard } from './guards/internal-api-key.guard';
@@ -47,6 +48,28 @@ export class InternalController {
       dto.betAmount,
       dto.payout,
       dto.finalMass,
+    );
+  }
+
+  /**
+   * SPRINT 5 — async kill-event recorder via BullMQ.
+   *
+   * The game-server calls this fire-and-forget on every kill (head-to-head
+   * or head-body collision).  The KillProcessorWorker writes a KillEvent
+   * audit row with 3-attempt exponential-backoff retry.
+   *
+   * Deterministic jobId `kill:<matchId>:<victimId>` ensures a game-server
+   * retry cannot create a duplicate kill record.
+   */
+  @Post('kill')
+  @HttpCode(HttpStatus.ACCEPTED)
+  enqueueKillEvent(@Body() dto: KillEventDto) {
+    return this.walletService.enqueueKillEvent(
+      dto.matchId,
+      dto.killerId,
+      dto.victimId,
+      dto.victimGrossPot,
+      dto.rakeRate,
     );
   }
 

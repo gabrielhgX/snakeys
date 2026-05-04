@@ -71,6 +71,9 @@ export class GameRoom {
 
   addPlayer(userId: string, socketId: string, email: string): PlayerState {
     const player = createPlayer(userId, socketId, email);
+    // SPRINT 5: initialise accumulated pot to the room buy-in so kill transfers
+    // are accurate from the very first kill.
+    player.accumulatedPot = this.buyIn;
     this.players.set(userId, player);
     return player;
   }
@@ -259,13 +262,17 @@ export class GameRoom {
         const ratio = a.serverMass / b.serverMass;
 
         if (ratio > 1 + HEAD_TO_HEAD_ADVANTAGE) {
+          // A wins: absorb mass, transfer pot, report kill (fire-and-forget)
           a.serverMass += b.serverMass * 0.5;
           a.mass        = a.serverMass;
           b.alive       = false;
+          this.reportKill(a, b);
         } else if (ratio < 1 - HEAD_TO_HEAD_ADVANTAGE) {
+          // B wins: symmetric
           b.serverMass += a.serverMass * 0.5;
           b.mass        = b.serverMass;
           a.alive       = false;
+          this.reportKill(b, a);
         } else {
           // Mutual kill — both die, pots go to house (logged for audit)
           console.log(
@@ -276,9 +283,43 @@ export class GameRoom {
           );
           a.alive = false;
           b.alive = false;
+          // Mutual kills: both pots go to the house; no reportKill needed.
         }
       }
     }
+  }
+
+  /**
+   * Records a kill and transfers the victim's accumulated pot to the killer.
+   * Called synchronously inside checkCollisions — the backend HTTP call is
+   * fire-and-forget so it never blocks the game loop.
+   *
+   * Pot accounting (in-memory, Sprint 5):
+   *   killer.accumulatedPot += victim.accumulatedPot * (1 - rakeRate)
+   *   victim.accumulatedPot  = 0
+   *
+   * The backend (KillProcessorWorker) writes the KillEvent audit row.
+   * Final financial settlement (FEE + WIN transactions) still happens via
+   * processMatchResult at match end.
+   */
+  private reportKill(killer: PlayerState, victim: PlayerState): void {
+    const RAKE_RATE  = 0.10;
+    const grossPot   = victim.accumulatedPot;
+    const netPot     = grossPot * (1 - RAKE_RATE);
+
+    // Update in-memory pot accounting
+    killer.accumulatedPot += netPot;
+    victim.accumulatedPot  = 0;
+
+    // Fire-and-forget backend call — errors are logged, never thrown
+    this.backend
+      .reportKill(this.id, killer.id, victim.id, grossPot)
+      .catch((err: Error) =>
+        console.error(
+          `[kill-report] failed matchId=${this.id} killer=${killer.id} ` +
+          `victim=${victim.id}: ${err.message}`,
+        ),
+      );
   }
 
   private applyHunger(): void {

@@ -1,5 +1,6 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
+import { JtiBlacklistMiddleware } from './auth/middleware/jti-blacklist.middleware';
 import { BullModule } from '@nestjs/bullmq';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
@@ -55,4 +56,16 @@ import { WalletModule } from './wallet/wallet.module';
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  /**
+   * SPRINT 5 — JTI Blacklist Middleware applied to every route.
+   *
+   * Runs before all guards (including JwtAuthGuard / JwtStrategy).
+   * Checks the Redis blacklist for the token's jti, short-circuiting
+   * the Passport pipeline for revoked tokens.  Falls-open if Redis is
+   * unavailable — JwtStrategy's PostgreSQL fallback acts as the safety net.
+   */
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(JtiBlacklistMiddleware).forRoutes('*');
+  }
+}

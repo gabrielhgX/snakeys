@@ -37,6 +37,25 @@ export class BackendClient {
     });
   }
 
+  /**
+   * SPRINT 5 — Reports a kill event to the backend kill-processor queue.
+   * Fire-and-forget: the caller (.catch) handles errors without blocking
+   * the game loop.  The backend enqueues the job and returns 202 immediately.
+   */
+  async reportKill(
+    matchId:        string,
+    killerId:       string,
+    victimId:       string,
+    victimGrossPot: number,
+  ): Promise<void> {
+    await this.http.post('/api/internal/kill', {
+      matchId,
+      killerId,
+      victimId,
+      victimGrossPot,
+    });
+  }
+
   async getUser(token: string): Promise<{ id: string; email: string } | null> {
     try {
       const res = await this.http.get('/api/users/me', {
