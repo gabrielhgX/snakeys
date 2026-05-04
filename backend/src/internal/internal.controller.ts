@@ -26,12 +26,22 @@ export class InternalController {
     return this.walletService.processBetEntry(dto.userId, dto.amount, dto.matchId, dto.mode);
   }
 
+  /**
+   * SPRINT 4 — async settlement via BullMQ.
+   *
+   * Previously this called processMatchResult() synchronously, blocking the
+   * game-server until the Postgres transaction committed.  Now it enqueues a
+   * BullMQ job and returns { queued, jobId } immediately (~1 ms vs ~20 ms).
+   *
+   * The MatchSettlementWorker picks up the job and executes the full ACID
+   * settlement (lockWallet + MatchSettlement guard + FEE/WIN transactions).
+   * Job deduplication via deterministic jobId (`settle:<matchId>:<userId>`)
+   * means a game-server retry cannot create a duplicate settlement job.
+   */
   @Post('match/result')
-  @HttpCode(HttpStatus.OK)
-  processMatchResult(@Body() dto: MatchResultDto) {
-    // Pass dto.finalMass so processMatchResult() stores it in Match.finalMass
-    // for later comparison against client-reported mass in settleMatchForUser().
-    return this.walletService.processMatchResult(
+  @HttpCode(HttpStatus.ACCEPTED)   // 202 — job accepted, will be processed async
+  enqueueMatchResult(@Body() dto: MatchResultDto) {
+    return this.walletService.enqueueMatchResult(
       dto.userId,
       dto.matchId,
       dto.betAmount,

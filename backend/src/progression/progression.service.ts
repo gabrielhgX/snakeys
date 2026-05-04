@@ -1,12 +1,26 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import {
   LevelInfo,
   cumulativeXpForLevel,
   levelInfo,
   xpForMatch,
 } from './progression.constants';
+
+// ─── Ranking types ────────────────────────────────────────────────────────────
+
+export interface RankingEntry {
+  rank:      number;
+  userId:    string;
+  email:     string;
+  accountXp: number;
+  level:     number;
+}
+
+// Cache TTL for the global ranking query — 5 minutes balances freshness vs DB load.
+const RANKING_CACHE_TTL_SECONDS = 300;
 
 /**
  * Result of `awardMatchXp`. The deltas let the client show a "+N XP"
@@ -27,7 +41,10 @@ export interface MatchXpAward {
 
 @Injectable()
 export class ProgressionService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   /**
    * Atomically credits XP for a finished match. Called by the wallet
@@ -86,6 +103,49 @@ export class ProgressionService {
       account: levelInfo(user.accountXp),
       season: levelInfo(user.seasonXp),
     };
+  }
+
+  /**
+   * Returns the global leaderboard sorted by lifetime XP (accountXp).
+   *
+   * SPRINT 4 — Redis cache with 5-minute TTL.
+   * Every call first checks Redis.  On a cache miss, it queries PostgreSQL,
+   * serialises the result, and writes it back with EX=300.  Subsequent calls
+   * within the 5-minute window skip the DB entirely — O(1) vs O(n log n).
+   *
+   * Cache invalidation: TTL-based only.  A user's rank may lag by up to
+   * 5 minutes after a match ends, which is acceptable for a leaderboard.
+   *
+   * @param limit  Maximum number of entries to return (default 100).
+   */
+  async getGlobalRanking(limit = 100): Promise<RankingEntry[]> {
+    const cacheKey = `ranking:global:${limit}`;
+
+    // ── Cache read ────────────────────────────────────────────────────────
+    const cached = await this.redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as RankingEntry[];
+    }
+
+    // ── Cache miss: query PostgreSQL ──────────────────────────────────────
+    const users = await this.prisma.user.findMany({
+      orderBy: { accountXp: 'desc' },
+      take:    limit,
+      select:  { id: true, email: true, accountXp: true },
+    });
+
+    const ranking: RankingEntry[] = users.map((u, i) => ({
+      rank:      i + 1,
+      userId:    u.id,
+      email:     u.email,
+      accountXp: u.accountXp,
+      level:     levelInfo(u.accountXp).level,
+    }));
+
+    // ── Cache write ───────────────────────────────────────────────────────
+    await this.redis.set(cacheKey, JSON.stringify(ranking), RANKING_CACHE_TTL_SECONDS);
+
+    return ranking;
   }
 
   /**

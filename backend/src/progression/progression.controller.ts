@@ -1,9 +1,12 @@
 import {
   Controller,
+  DefaultValuePipe,
   Get,
   HttpCode,
   HttpStatus,
+  ParseIntPipe,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -30,6 +33,27 @@ export class ProgressionController {
   @UseGuards(JwtAuthGuard)
   getMe(@Req() req: any) {
     return this.progression.getProgression(req.user.id);
+  }
+
+  /**
+   * SPRINT 4 — Global leaderboard, cached in Redis for 5 minutes.
+   *
+   * Public endpoint (no JWT required) so the lobby landing page and
+   * anonymous visitors can display the ranking without logging in.
+   * Cache prevents the ORDER BY accountXp DESC from hammering Postgres on
+   * every page load at peak traffic.
+   *
+   * Query param `limit` (1-200, default 100) controls page size.
+   * Responses for different `limit` values are cached independently.
+   */
+  @Get('ranking')
+  @SkipThrottle()
+  getGlobalRanking(
+    @Query('limit', new DefaultValuePipe(100), new ParseIntPipe({ optional: true }))
+    limit: number,
+  ) {
+    const safeLimit = Math.min(Math.max(1, limit), 200);
+    return this.progression.getGlobalRanking(safeLimit);
   }
 
   /**

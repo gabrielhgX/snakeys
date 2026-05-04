@@ -7,6 +7,8 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { MatchStatus, TransactionStatus, TransactionType } from '@prisma/client';
 import { Decimal, PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
@@ -16,6 +18,11 @@ import {
   ProgressionService,
 } from '../progression/progression.service';
 import { generatePixCode } from './pix-code.util';
+import {
+  MATCH_SETTLEMENT_JOB,
+  MATCH_SETTLEMENT_QUEUE,
+  MatchSettlementJobData,
+} from './queues/match-settlement.types';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -61,8 +68,10 @@ export class WalletService {
   private readonly logger = new Logger(WalletService.name);
 
   constructor(
-    private prisma: PrismaService,
-    private progression: ProgressionService,
+    private readonly prisma: PrismaService,
+    private readonly progression: ProgressionService,
+    @InjectQueue(MATCH_SETTLEMENT_QUEUE)
+    private readonly settlementQueue: Queue<MatchSettlementJobData>,
   ) {}
 
   // ── Public read endpoints ──────────────────────────────────────────────────
@@ -549,6 +558,52 @@ export class WalletService {
 
       return { settled: true, payout };
     });
+  }
+
+  // ── SPRINT 4 — Async settlement via BullMQ ────────────────────────────────
+
+  /**
+   * Enqueues a match-settlement job instead of executing it inline.
+   * Used exclusively by the game-server path (InternalController).
+   *
+   * Why async for the game-server path, but sync for the client path?
+   *   • Game-server: fire-and-forget is acceptable — the server emits match_end
+   *     and moves on.  BullMQ persists the job in Redis; it survives backend
+   *     restarts.  The Sprint 2 reconciler acts as a safety net after 120 min.
+   *   • Client (settleMatchForUser): must return {balance, xp} immediately so
+   *     the lobby can update the UI — stays synchronous.
+   *
+   * Idempotency is fully preserved: processMatchResult (called by the worker)
+   * still creates the MatchSettlement row as its first atomic write, so a
+   * duplicate job from a game-server retry causes a P2002 → alreadySettled.
+   */
+  async enqueueMatchResult(
+    userId:     string,
+    matchId:    string,
+    betAmount:  number,
+    payout:     number,
+    finalMass?: number,
+  ): Promise<{ queued: boolean; jobId: string }> {
+    this.assertPositive(betAmount);
+    if (payout < 0) throw new BadRequestException('Payout cannot be negative');
+
+    const job = await this.settlementQueue.add(
+      MATCH_SETTLEMENT_JOB,
+      { userId, matchId, betAmount, payout, finalMass },
+      {
+        jobId:   `settle:${matchId}:${userId}`,  // deterministic → deduplicates retries
+        attempts: 5,
+        backoff:  { type: 'exponential', delay: 2_000 },
+        removeOnComplete: 100,  // keep last 100 for debug; Redis memory bounded
+        removeOnFail:     500,  // keep last 500 failures for post-mortem analysis
+      },
+    );
+
+    this.logger.debug(
+      `Settlement enqueued job=${job.id} userId=${userId} matchId=${matchId} payout=${payout}`,
+    );
+
+    return { queued: true, jobId: job.id as string };
   }
 
   // ── Public match flow (called by Lobby + game UI) ─────────────────────────

@@ -10,6 +10,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { randomBytes, randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 
@@ -18,8 +19,9 @@ export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
-    private prisma: PrismaService,
-    private jwtService: JwtService,
+    private readonly prisma: PrismaService,
+    private readonly jwtService: JwtService,
+    private readonly redis: RedisService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -125,11 +127,18 @@ export class AuthService {
   }
 
   async logout(jti: string, expiresAt: Date): Promise<{ message: string }> {
-    await this.prisma.revokedToken.upsert({
-      where: { jti },
-      create: { jti, expiresAt },
-      update: {},
-    });
+    // SPRINT 4 — dual-write: Redis (primary, O(1) lookup) + PostgreSQL (audit trail).
+    // Redis entry auto-expires when the JWT would have expired anyway, so no
+    // cleanup job is needed for the blacklist.  The Prisma RevokedToken row is
+    // kept for compliance / audit and cleaned up by TokenCleanupService hourly.
+    await Promise.all([
+      this.redis.revokeJti(jti, expiresAt),
+      this.prisma.revokedToken.upsert({
+        where:  { jti },
+        create: { jti, expiresAt },
+        update: {},
+      }),
+    ]);
     return { message: 'Logged out successfully' };
   }
 

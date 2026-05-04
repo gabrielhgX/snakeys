@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
+import { BullModule } from '@nestjs/bullmq';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AuthModule } from './auth/auth.module';
@@ -8,17 +9,32 @@ import { CosmeticsModule } from './cosmetics/cosmetics.module';
 import { InternalModule } from './internal/internal.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { MarketplaceModule } from './marketplace/marketplace.module';
+import { MatchReconciliationModule } from './match-reconciliation/match-reconciliation.module';
 import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProgressionModule } from './progression/progression.module';
+import { RedisModule } from './redis/redis.module';
 import { UserModule } from './user/user.module';
 import { WalletModule } from './wallet/wallet.module';
-import { MatchReconciliationModule } from './match-reconciliation/match-reconciliation.module';
 
 @Module({
   imports: [
     ScheduleModule.forRoot(),
     ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 100 }]),
+    // ── Infrastructure ───────────────────────────────────────────────────
+    // RedisModule must come before any module that injects RedisService
+    // (it is @Global so no need to re-import in child modules).
+    RedisModule,
+    // BullModule.forRoot wires the shared Redis connection used by every
+    // registerQueue() call throughout the app.
+    BullModule.forRoot({
+      connection: {
+        host:     process.env.REDIS_HOST     ?? 'localhost',
+        port:     parseInt(process.env.REDIS_PORT ?? '6379', 10),
+        password: process.env.REDIS_PASSWORD ?? undefined,
+        db:       parseInt(process.env.REDIS_DB   ?? '0',   10),
+      },
+    }),
     PrismaModule,
     AuthModule,
     UserModule,
