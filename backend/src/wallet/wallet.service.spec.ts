@@ -46,6 +46,13 @@ const mockTx = {
 const mockPrisma = {
   user: { findUnique: jest.fn() },
   wallet: { findUnique: jest.fn() },
+  // Sprint 6 — concurrent-match guard (§2.5) queries match.findFirst
+  // BEFORE opening the wallet transaction.  Default to "no concurrent
+  // match"; individual tests can override for the collision case.
+  match: {
+    findFirst:  jest.fn().mockResolvedValue(null),
+    findUnique: jest.fn(),
+  },
   transaction: {
     findUnique: jest.fn(),
     findMany: jest.fn(),
@@ -99,6 +106,7 @@ describe('WalletService', () => {
         balanceLocked:    String(result.balanceLocked),
       }];
     });
+    mockPrisma.match.findFirst.mockResolvedValue(null);
     mockTx.matchSettlement.create.mockResolvedValue({});
     mockTx.match.create.mockResolvedValue({});
     mockTx.match.update.mockResolvedValue({});
@@ -289,6 +297,16 @@ describe('WalletService', () => {
       const result = await service.processBetEntry('user-1', 10, 'match-1');
 
       expect(result).toEqual(existing);
+      expect(mockTx.wallet.update).not.toHaveBeenCalled();
+    });
+
+    it('throws ConflictException when the user already has an ACTIVE match (audit §2.5)', async () => {
+      mockPrisma.match.findFirst.mockResolvedValue({ matchId: 'other-match' });
+
+      await expect(
+        service.processBetEntry('user-1', 10, 'match-1'),
+      ).rejects.toThrow('partida ativa');
+
       expect(mockTx.wallet.update).not.toHaveBeenCalled();
     });
   });

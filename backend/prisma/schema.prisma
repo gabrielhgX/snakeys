@@ -122,8 +122,22 @@ enum TransactionStatus {
 
 // ─── Match Lifecycle ──────────────────────────────────────────────────────────
 
+// SPRINT 6 — Compliance audit §2.1 suggests a 5-state machine
+// (BETTING | ACTIVE | SETTLING | SETTLED | ABANDONED).  We intentionally
+// collapse it to 3 states because our flow is atomic:
+//   • processBetEntry() creates the Match row as ACTIVE inside the SAME
+//     Prisma transaction that locks the Wallet balance, so there is no
+//     observable "BETTING" window between debit and match start.
+//   • processMatchResult() flips ACTIVE → SETTLED in the SAME transaction
+//     that credits the payout, so there is no observable "SETTLING"
+//     window either.
+//   • Reconciliation only needs to act on rows stuck in ACTIVE; BETTING
+//     and SETTLING would be unreachable states in our pipeline.
+// The simplification is documented here so future refactors that split
+// the bet/start or settle/credit phases MUST reintroduce the missing
+// states AND update reconcileAbandonedMatches() accordingly.
 enum MatchStatus {
-  ACTIVE    // BET locked, game in progress
+  ACTIVE    // BET locked + match in progress (merges audit's BETTING+ACTIVE+SETTLING)
   SETTLED   // processMatchResult() completed successfully
   ABANDONED // reconciler timed out — bet refunded to balanceAvailable
 }

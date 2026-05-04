@@ -410,6 +410,32 @@ export class WalletService {
 
     const idempotencyKey = `bet:${matchId}:${userId}`;
 
+    // ── SPRINT 6 (Audit §2.5 — concurrent-match guard) ───────────────────
+    // Reject a new bet if the user already has an ACTIVE Match for a
+    // DIFFERENT matchId.  The `bet:<matchId>:<userId>` idempotency key only
+    // protects against double-locking the SAME match on retry — it does
+    // nothing against the "two tabs, two different matchIds" exploit where
+    // a single user would otherwise hold two concurrent bets.
+    //
+    // Check runs OUTSIDE the transaction: it's an advisory read and the
+    // authoritative uniqueness guarantee is still the per-user Match
+    // lifecycle (enforced by processMatchResult flipping status to SETTLED
+    // before the next bet is accepted).  A borderline race where two calls
+    // arrive within milliseconds is acceptable because both would observe
+    // no ACTIVE row — the financial loss is bounded by the Wallet lock
+    // downstream (balanceAvailable check still fires), and the reconciler
+    // cleans up the orphaned match after ABANDON_AFTER_MS.
+    const concurrentMatch = await (this.prisma as any).match.findFirst({
+      where: { userId, status: MatchStatus.ACTIVE, matchId: { not: matchId } },
+      select: { matchId: true },
+    });
+    if (concurrentMatch) {
+      throw new ConflictException(
+        `Você já está em uma partida ativa (${concurrentMatch.matchId}). ` +
+        `Finalize-a antes de iniciar outra.`,
+      );
+    }
+
     // ── SPRINT 6 (Collusion Detection — pre-bet check) ───────────────────
     // Run OUTSIDE the wallet transaction so the row-level lock on Wallet is
     // held for the minimum possible duration.  The check is inherently
