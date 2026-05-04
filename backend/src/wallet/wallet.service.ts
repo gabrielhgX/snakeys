@@ -8,9 +8,10 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { TransactionStatus, TransactionType } from '@prisma/client';
+import { MatchStatus, TransactionStatus, TransactionType } from '@prisma/client';
 import { Decimal, PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
+import { lockWallet } from './wallet.util';
 import {
   MatchXpAward,
   ProgressionService,
@@ -242,7 +243,7 @@ export class WalletService {
       // SELECT FOR UPDATE acquires a row-level write lock.  Any concurrent
       // transaction attempting to lock the same row will block here until
       // this transaction commits or rolls back, eliminating the TOCTOU race.
-      const wallet = await this.lockWallet(tx, userId);
+      const wallet = await lockWallet(tx, userId);
 
       if (wallet.balanceAvailable.lessThan(amount)) {
         throw new BadRequestException('Insufficient available balance');
@@ -332,7 +333,7 @@ export class WalletService {
       }
 
       // Lock before crediting to prevent concurrent double-confirm races.
-      const wallet = await this.lockWallet(tx, deposit.userId);
+      const wallet = await lockWallet(tx, deposit.userId);
 
       await tx.wallet.update({
         where: { userId: deposit.userId },
@@ -378,7 +379,7 @@ export class WalletService {
       if (existing) return existing;
 
       // ── SPRINT 1 FIX (Issue 1.2): Lock wallet before balance check ──────
-      const wallet = await this.lockWallet(tx, userId);
+      const wallet = await lockWallet(tx, userId);
 
       if (wallet.balanceAvailable.lessThan(amount)) {
         throw new BadRequestException('Insufficient available balance');
@@ -392,7 +393,7 @@ export class WalletService {
         },
       });
 
-      return tx.transaction.create({
+      const betTx = await tx.transaction.create({
         data: {
           userId,
           type:           TransactionType.BET,
@@ -403,6 +404,21 @@ export class WalletService {
           status:         TransactionStatus.COMPLETED,
         },
       });
+
+      // SPRINT 2 — create the Match lifecycle record atomically with the BET.
+      // If processBetEntry() is retried (idempotency guard above returns early),
+      // this block is never reached, so the Match row is created exactly once.
+      await (tx as any).match.create({
+        data: {
+          matchId,
+          userId,
+          mode:      mode ?? 'private',
+          status:    MatchStatus.ACTIVE,
+          betAmount: new Decimal(amount),
+        },
+      });
+
+      return betTx;
     });
   }
 
@@ -477,7 +493,7 @@ export class WalletService {
       }
 
       // ── SPRINT 1 FIX (Issue 1.2): Lock wallet before mutation ───────────
-      const wallet = await this.lockWallet(tx, userId);
+      const wallet = await lockWallet(tx, userId);
 
       if (wallet.balanceLocked.lessThan(recordedBet)) {
         throw new BadRequestException('Insufficient locked balance to settle match');
@@ -514,6 +530,14 @@ export class WalletService {
           },
         });
       }
+
+      // SPRINT 2 — mark the Match lifecycle record as SETTLED.
+      // updateMany with the ACTIVE filter is a no-op for matches that pre-date
+      // Sprint 2 (no Match row) or that the reconciler already marked ABANDONED.
+      await (tx as any).match.updateMany({
+        where:  { userId, matchId, status: MatchStatus.ACTIVE },
+        data:   { status: MatchStatus.SETTLED },
+      });
 
       return { settled: true, payout };
     });
@@ -658,50 +682,6 @@ export class WalletService {
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
-
-  /**
-   * Acquires a PostgreSQL row-level write lock on the Wallet row and
-   * returns the current balances as Decimal instances.
-   *
-   * USAGE: Call this as the FIRST operation inside a prisma.$transaction()
-   * block whenever the subsequent code will read-then-update balances.
-   *
-   * WHY FOR UPDATE:
-   *   At the default READ COMMITTED isolation, two concurrent transactions
-   *   can both read the same stale balance before either writes.  SELECT
-   *   FOR UPDATE forces the second transaction to wait at this line until
-   *   the first commits, guaranteeing it reads the post-commit balance.
-   *
-   * The pg driver returns NUMERIC columns as strings; we wrap in Decimal to
-   * preserve the full 18,8 precision without floating-point drift.
-   */
-  private async lockWallet(
-    tx: any,
-    userId: string,
-  ): Promise<{ balanceAvailable: Decimal; balanceLocked: Decimal }> {
-    const rows = await tx.$queryRaw<
-      Array<{ balanceAvailable: string; balanceLocked: string }>
-    >`
-      SELECT "balanceAvailable", "balanceLocked"
-      FROM   "Wallet"
-      WHERE  "userId" = ${userId}
-      FOR UPDATE
-    `;
-
-    if (rows.length === 0) throw new NotFoundException('Wallet not found');
-
-    return {
-      balanceAvailable: new Decimal(rows[0].balanceAvailable),
-      balanceLocked:    new Decimal(rows[0].balanceLocked),
-    };
-  }
-
-  /** Read-only wallet fetch — use only for non-mutating checks. */
-  private async requireWallet(tx: any, userId: string) {
-    const wallet = await tx.wallet.findUnique({ where: { userId } });
-    if (!wallet) throw new NotFoundException('Wallet not found');
-    return wallet;
-  }
 
   private async requireWalletDirect(userId: string) {
     const wallet = await this.prisma.wallet.findUnique({ where: { userId } });

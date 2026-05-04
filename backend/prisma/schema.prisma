@@ -18,11 +18,6 @@ model User {
   createdAt                        DateTime             @default(now())
 
   // ── Progression ───────────────────────────────────────────────────────
-  // `accountXp` is permanent / cross-season. `seasonXp` is what drives
-  // the Battle Pass level and is what gets reset by the admin action at
-  // each season rollover. Both increment by the same rules at runtime
-  // (see ProgressionService) so the only meaningful difference is the
-  // reset semantics.
   accountXp     Int    @default(0)
   seasonXp      Int    @default(0)
 
@@ -37,6 +32,7 @@ model User {
   userItems                        UserItem[]
   listings                         MarketplaceListing[]
   battlePassClaims                 UserBattlePassClaim[]
+  matches                          Match[]
 }
 
 model Wallet {
@@ -97,6 +93,41 @@ enum TransactionStatus {
   PENDING
   COMPLETED
   FAILED
+}
+
+// ─── Match Lifecycle ──────────────────────────────────────────────────────────
+
+enum MatchStatus {
+  ACTIVE    // BET locked, game in progress
+  SETTLED   // processMatchResult() completed successfully
+  ABANDONED // reconciler timed out — bet refunded to balanceAvailable
+}
+
+// Tracks one user's participation in a match.  One row per (userId, matchId).
+// In online mode multiple users share the same matchId (the game-room ID),
+// each with their own row and their own betAmount.
+//
+// Lifecycle:
+//   ACTIVE    → created atomically with the BET transaction in processBetEntry()
+//   SETTLED   → updated atomically inside processMatchResult() on success
+//   ABANDONED → updated by MatchReconciliationService when a match stays ACTIVE
+//               longer than ABANDON_AFTER_MS without a MatchSettlement record
+//
+// The @@index([status, createdAt]) is the reconciler's primary read path:
+//   WHERE status = 'ACTIVE' AND createdAt < <cutoff>
+model Match {
+  id        String      @id @default(uuid())
+  matchId   String      // game-room / session identifier
+  userId    String
+  mode      String      // 'hunt-hunt' | 'big-fish' | 'private'
+  status    MatchStatus @default(ACTIVE)
+  betAmount Decimal     @db.Decimal(18, 8)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  user      User        @relation(fields: [userId], references: [id])
+
+  @@unique([userId, matchId])
+  @@index([status, createdAt])
 }
 
 model RevokedToken {

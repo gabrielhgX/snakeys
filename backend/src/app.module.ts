@@ -13,6 +13,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { ProgressionModule } from './progression/progression.module';
 import { UserModule } from './user/user.module';
 import { WalletModule } from './wallet/wallet.module';
+import { MatchReconciliationModule } from './match-reconciliation/match-reconciliation.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { WalletModule } from './wallet/wallet.module';
     ProgressionModule,
     CosmeticsModule,
     BattlePassModule,
+    MatchReconciliationModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
