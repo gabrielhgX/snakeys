@@ -9,7 +9,17 @@ import { lockWallet } from '../wallet/wallet.util';
 // record is treated as orphaned (game-server crash / network partition).
 // 120 minutes is long enough to cover the longest legitimate match (Hunt-Hunt
 // = 60 min) plus a generous grace buffer for slow settlement calls.
-const ABANDON_AFTER_MS = 120 * 60 * 1000;
+//
+// SPRINT 6 — configurable via `MATCH_ABANDON_AFTER_MS` so ops can tighten
+// the window for private-room / short matches without a redeploy.  The
+// audit document suggests 10 min as a starting point for BETTING-phase
+// matches; we keep 120 min as a safe default for ACTIVE matches because
+// tightening it below the longest legitimate match duration would refund
+// still-running games.
+const ABANDON_AFTER_MS = parseInt(
+  process.env.MATCH_ABANDON_AFTER_MS ?? `${120 * 60 * 1000}`,
+  10,
+);
 
 @Injectable()
 export class MatchReconciliationService {

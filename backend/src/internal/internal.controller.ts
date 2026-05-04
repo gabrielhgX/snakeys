@@ -24,7 +24,13 @@ export class InternalController {
   @HttpCode(HttpStatus.OK)
   processBetEntry(@Body() dto: MatchEntryDto) {
     // Pass dto.mode so processBetEntry() stores it in the Match lifecycle record.
-    return this.walletService.processBetEntry(dto.userId, dto.amount, dto.matchId, dto.mode);
+    return this.walletService.processBetEntry(
+      dto.userId,
+      dto.amount,
+      dto.matchId,
+      dto.mode,
+      dto.ipAddress,
+    );
   }
 
   /**

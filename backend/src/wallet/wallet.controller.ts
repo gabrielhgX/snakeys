@@ -56,6 +56,7 @@ export class WalletController {
       req.user.id,
       dto.amount,
       dto.cpf,
+      dto.pixKey,
       dto.idempotencyKey,
     );
   }
@@ -89,10 +90,15 @@ export class WalletController {
   @Post('match/entry')
   @HttpCode(HttpStatus.OK)
   startMatch(@Req() req: any, @Body() dto: MatchEntryDto) {
+    // SPRINT 6 — forward client IP for collusion detection.  Express puts
+    // the resolved IP on `req.ip`; behind a proxy the platform must set
+    // `app.set('trust proxy', true)` so the X-Forwarded-For hop is honoured.
+    const ipAddress: string | undefined = req.ip;
     return this.walletService.startMatchForUser(
       req.user.id,
       dto.mode,
       dto.amount,
+      ipAddress,
     );
   }
 

@@ -16,4 +16,11 @@ export class MatchEntryDto {
   @IsOptional()
   @IsIn(['hunt-hunt', 'big-fish', 'private'])
   mode?: string;
+
+  // SPRINT 6 — game-server forwards the player's socket IP so the
+  // CollusionService can compare participants of the same match.  Optional
+  // to preserve backwards compatibility with the current game-server build.
+  @IsOptional()
+  @IsString()
+  ipAddress?: string;
 }

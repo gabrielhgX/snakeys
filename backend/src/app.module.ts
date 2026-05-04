@@ -4,6 +4,7 @@ import { JtiBlacklistMiddleware } from './auth/middleware/jti-blacklist.middlewa
 import { BullModule } from '@nestjs/bullmq';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { AntiFraudModule } from './anti-fraud/anti-fraud.module';
 import { AuthModule } from './auth/auth.module';
 import { BattlePassModule } from './battle-pass/battle-pass.module';
 import { CosmeticsModule } from './cosmetics/cosmetics.module';
@@ -37,6 +38,9 @@ import { WalletModule } from './wallet/wallet.module';
       },
     }),
     PrismaModule,
+    // AntiFraudModule is @Global — declared early so CollusionService is
+    // available to WalletModule and any future compliance consumer.
+    AntiFraudModule,
     AuthModule,
     UserModule,
     WalletModule,

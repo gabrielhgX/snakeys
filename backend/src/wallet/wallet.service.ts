@@ -18,6 +18,8 @@ import {
   ProgressionService,
 } from '../progression/progression.service';
 import { generatePixCode } from './pix-code.util';
+import { PixVerificationService } from './pix/pix-verification.service';
+import { CollusionService } from '../anti-fraud/collusion.service';
 import {
   MATCH_SETTLEMENT_JOB,
   MATCH_SETTLEMENT_QUEUE,
@@ -75,6 +77,8 @@ export class WalletService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly progression: ProgressionService,
+    private readonly pixVerification: PixVerificationService,
+    private readonly collusion: CollusionService,
     @InjectQueue(MATCH_SETTLEMENT_QUEUE)
     private readonly settlementQueue: Queue<MatchSettlementJobData>,
     @InjectQueue(KILL_PROCESSOR_QUEUE)
@@ -218,6 +222,7 @@ export class WalletService {
     userId: string,
     amount: number,
     cpf: string,
+    pixKey: string,
     idempotencyKey: string,
   ): Promise<WithdrawIntent> {
     this.assertPositive(amount);
@@ -239,6 +244,20 @@ export class WalletService {
     // withdraw to a CPF other than their own (identity/fraud prevention).
     if (user.cpf !== normalizedCpf) {
       throw new ForbiddenException('CPF does not match the account on file');
+    }
+
+    // ── SPRINT 6 (Audit item 5 — verifyPixOwnership) ──────────────────────
+    // Cross-validate that the Pix key the user wants to receive on actually
+    // belongs to the CPF on file.  Without this guard an attacker with a
+    // stolen session could drain funds to a third-party key (money mule).
+    const ownership = await this.pixVerification.verifyPixOwnership(
+      pixKey,
+      user.cpf,
+    );
+    if (!ownership.verified) {
+      throw new ForbiddenException(
+        `Chave Pix não pertence ao CPF cadastrado: ${ownership.reason}`,
+      );
     }
 
     const existing = await this.prisma.transaction.findUnique({
@@ -385,10 +404,21 @@ export class WalletService {
     amount: number,
     matchId: string,
     mode?: string,
+    ipAddress?: string,
   ) {
     this.assertPositive(amount);
 
     const idempotencyKey = `bet:${matchId}:${userId}`;
+
+    // ── SPRINT 6 (Collusion Detection — pre-bet check) ───────────────────
+    // Run OUTSIDE the wallet transaction so the row-level lock on Wallet is
+    // held for the minimum possible duration.  The check is inherently
+    // best-effort (there is no lock on the Match table for the pair of
+    // participants we are comparing against) and a borderline false-positive
+    // is acceptable — collusion is slow-moving, idempotent retries are not.
+    if (ipAddress) {
+      await this.collusion.assertNoIpCollision(userId, matchId, ipAddress);
+    }
 
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.transaction.findUnique({
@@ -424,8 +454,8 @@ export class WalletService {
       });
 
       // SPRINT 2 — create the Match lifecycle record atomically with the BET.
-      // If processBetEntry() is retried (idempotency guard above returns early),
-      // this block is never reached, so the Match row is created exactly once.
+      // SPRINT 6 — persist ipAddress so the collusion detector can analyse
+      // kill events later (shared-IP scoring in scoreKillCollusion()).
       await (tx as any).match.create({
         data: {
           matchId,
@@ -433,6 +463,7 @@ export class WalletService {
           mode:      mode ?? 'private',
           status:    MatchStatus.ACTIVE,
           betAmount: new Decimal(amount),
+          ipAddress: ipAddress ?? null,
         },
       });
 
@@ -625,6 +656,7 @@ export class WalletService {
     userId: string,
     mode: string,
     amount: number,
+    ipAddress?: string,
   ): Promise<{ matchId: string; balance: number; locked: number }> {
     this.assertPositive(amount);
     if (!['hunt-hunt', 'big-fish', 'private'].includes(mode)) {
@@ -632,7 +664,7 @@ export class WalletService {
     }
 
     const matchId = randomUUID();
-    await this.processBetEntry(userId, amount, matchId, mode);
+    await this.processBetEntry(userId, amount, matchId, mode, ipAddress);
     const bal = await this.getBalance(userId);
 
     return { matchId, balance: bal.balance, locked: bal.locked };
@@ -862,6 +894,18 @@ export class WalletService {
       }
       throw e;
     }
+
+    // ── SPRINT 6 (Collusion scoring — post-kill) ─────────────────────────
+    // Fire-and-forget: a failure in the detector must not block the kill
+    // audit write.  The service records a structured WARN log if the score
+    // exceeds the review threshold; a human operator decides next steps.
+    this.collusion
+      .scoreKillCollusion({ matchId, killerId, victimId })
+      .catch((err) =>
+        this.logger.warn(
+          `Collusion scoring failed for kill ${idempotencyKey}: ${(err as Error).message}`,
+        ),
+      );
 
     return { alreadyRecorded: false, rake, netTransferred };
   }

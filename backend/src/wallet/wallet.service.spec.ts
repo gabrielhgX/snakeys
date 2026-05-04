@@ -4,7 +4,14 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TransactionStatus, TransactionType } from '@prisma/client';
+import { getQueueToken } from '@nestjs/bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { ProgressionService } from '../progression/progression.service';
+import { CollusionService } from '../anti-fraud/collusion.service';
+import { PixGatewayService } from './pix/pix-gateway.service';
+import { PixVerificationService } from './pix/pix-verification.service';
+import { KILL_PROCESSOR_QUEUE } from './queues/kill-processor.types';
+import { MATCH_SETTLEMENT_QUEUE } from './queues/match-settlement.types';
 import { WalletService } from './wallet.service';
 
 // ─── Prisma mock helpers ───────────────────────────────────────────────────────
@@ -20,6 +27,20 @@ const mockTx = {
     create: jest.fn(),
     update: jest.fn(),
   },
+  // Sprint 1 additions — mirrors the real Prisma interactive-tx surface.
+  matchSettlement: {
+    create: jest.fn(),
+  },
+  match: {
+    create:     jest.fn(),
+    update:     jest.fn(),
+    updateMany: jest.fn(),
+    findUnique: jest.fn(),
+  },
+  // lockWallet() issues a raw SELECT ... FOR UPDATE.  Default to echoing
+  // whatever wallet.findUnique() was set up to return so tests don't need
+  // to duplicate the balance fixture twice.
+  $queryRaw: jest.fn(),
 };
 
 const mockPrisma = {
@@ -66,11 +87,42 @@ describe('WalletService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockPrisma.$transaction.mockImplementation((fn: any) => fn(mockTx));
+    // Default: $queryRaw (used by lockWallet) echoes the same row the
+    // test's wallet.findUnique mock would return.  Tests that need a
+    // different locked balance override this before calling the service.
+    mockTx.$queryRaw.mockImplementation(async () => {
+      const w = mockTx.wallet.findUnique.getMockImplementation();
+      const result = w ? await w() : await mockTx.wallet.findUnique();
+      if (!result) return [];
+      return [{
+        balanceAvailable: String(result.balanceAvailable),
+        balanceLocked:    String(result.balanceLocked),
+      }];
+    });
+    mockTx.matchSettlement.create.mockResolvedValue({});
+    mockTx.match.create.mockResolvedValue({});
+    mockTx.match.update.mockResolvedValue({});
+    mockTx.match.updateMany.mockResolvedValue({ count: 1 });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         WalletService,
         { provide: PrismaService, useValue: mockPrisma },
+        // Pre-existing deps — stubbed so Nest DI can resolve WalletService.
+        { provide: ProgressionService, useValue: {
+          awardMatchXp: jest.fn().mockResolvedValue(null),
+        } },
+        { provide: getQueueToken(MATCH_SETTLEMENT_QUEUE), useValue: { add: jest.fn() } },
+        { provide: getQueueToken(KILL_PROCESSOR_QUEUE),   useValue: { add: jest.fn() } },
+        // Sprint 6 deps.
+        PixGatewayService,
+        PixVerificationService,
+        { provide: CollusionService, useValue: {
+          assertNoIpCollision: jest.fn().mockResolvedValue(undefined),
+          scoreKillCollusion:  jest.fn().mockResolvedValue({
+            score: 0, reasons: [], flagged: false, sharedIp: false, priorKills: 0,
+          }),
+        } },
       ],
     }).compile();
 

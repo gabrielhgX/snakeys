@@ -151,12 +151,18 @@ model Match {
   // authoritative final mass.  Null for offline (client-driven) matches.
   // Used by settleMatchForUser() to detect client-reported mass discrepancies.
   finalMass Decimal?    @db.Decimal(18, 8)
+  // SPRINT 6: client IP at BET time.  Used by CollusionService to detect
+  // two different userIds joining the same matchId from the same network
+  // (pot-farming between alt accounts).  Nullable so old rows and offline
+  // / private-room matches without a socket still validate.
+  ipAddress String?
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
   user      User        @relation(fields: [userId], references: [id])
 
   @@unique([userId, matchId])
   @@index([status, createdAt])
+  @@index([matchId, ipAddress])
 }
 
 model RevokedToken {
